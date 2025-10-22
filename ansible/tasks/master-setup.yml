@@ -1,0 +1,186 @@
+---
+# K3s Master Node Setup Tasks
+# Installs and configures K3s server (control plane)
+
+- name: Check if K3s is already installed
+  stat:
+    path: /usr/local/bin/k3s
+  register: k3s_installed
+  tags: [master, install]
+
+- name: Check K3s version if installed
+  command: k3s --version
+  register: k3s_current_version
+  changed_when: false
+  failed_when: false
+  when: k3s_installed.stat.exists
+  tags: [master, install]
+
+- name: Install K3s on master node
+  shell: "{{ k3s_master_install_cmd }}"
+  register: k3s_install
+  when: not k3s_installed.stat.exists or k3s_version not in k3s_current_version.stdout
+  tags: [master, install]
+
+- name: Wait for K3s to be ready
+  wait_for:
+    path: /var/lib/rancher/k3s/server/node-token
+    timeout: 120
+  when: k3s_install is changed
+  tags: [master, install]
+
+- name: Enable and start K3s service
+  systemd:
+    name: k3s
+    enabled: yes
+    state: started
+  tags: [master, service]
+
+- name: Wait for K3s API server to be ready
+  wait_for:
+    host: "{{ k3s_master_ip }}"
+    port: "{{ k3s_api_port }}"
+    timeout: 120
+  tags: [master, service]
+
+- name: Create .kube directory for pi user
+  file:
+    path: /home/pi/.kube
+    state: directory
+    owner: pi
+    group: pi
+    mode: '0755'
+  tags: [master, config]
+
+- name: Copy kubeconfig to pi user
+  copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: /home/pi/.kube/config
+    remote_src: yes
+    owner: pi
+    group: pi
+    mode: '0600'
+  tags: [master, config]
+
+- name: Update kubeconfig server address
+  lineinfile:
+    path: /home/pi/.kube/config
+    regexp: '^\s+server:\s+https://.*:6443'
+    line: "    server: https://{{ k3s_master_ip }}:{{ k3s_api_port }}"
+    backrefs: yes
+  tags: [master, config]
+
+- name: Set KUBECONFIG environment variable
+  lineinfile:
+    path: /home/pi/.bashrc
+    line: 'export KUBECONFIG=/home/pi/.kube/config'
+    state: present
+  tags: [master, config]
+
+- name: Install kubectl completion
+  lineinfile:
+    path: /home/pi/.bashrc
+    line: 'source <(kubectl completion bash)'
+    state: present
+  when: install_kubectl_completion
+  tags: [master, config]
+
+- name: Add kubectl alias
+  lineinfile:
+    path: /home/pi/.bashrc
+    line: 'alias k=kubectl'
+    state: present
+  tags: [master, config]
+
+- name: Install Helm
+  block:
+    - name: Download Helm installer
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0700'
+
+    - name: Install Helm
+      shell: /tmp/get_helm.sh
+      args:
+        creates: /usr/local/bin/helm
+      environment:
+        DESIRED_VERSION: "{{ helm_version }}"
+
+    - name: Clean up Helm installer
+      file:
+        path: /tmp/get_helm.sh
+        state: absent
+  when: install_helm
+  tags: [master, helm]
+
+- name: Read K3s node token
+  slurp:
+    src: "{{ k3s_token_file }}"
+  register: k3s_token_raw
+  tags: [master, token]
+
+- name: Set K3s token fact for all hosts
+  set_fact:
+    k3s_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+  delegate_to: "{{ item }}"
+  delegate_facts: yes
+  loop: "{{ groups['k3s_cluster'] }}"
+  tags: [master, token]
+
+- name: Check K3s service status
+  systemd:
+    name: k3s
+  register: k3s_service_status
+  tags: [master, verify]
+
+- name: Get K3s service logs if not running
+  command: journalctl -u k3s -n 50 --no-pager
+  register: k3s_logs
+  when: k3s_service_status.status.ActiveState != "active"
+  tags: [master, verify]
+
+- name: Display K3s logs if service failed
+  debug:
+    msg: "{{ k3s_logs.stdout_lines }}"
+  when: k3s_service_status.status.ActiveState != "active"
+  tags: [master, verify]
+
+- name: Fail if K3s service is not running
+  fail:
+    msg: |
+      K3s service is not running!
+      Status: {{ k3s_service_status.status.ActiveState }}
+      SubState: {{ k3s_service_status.status.SubState }}
+
+      Check the logs above for errors.
+      Common issues:
+      - Memory cgroups not enabled (check /proc/cmdline)
+      - iptables tools missing
+      - Port 6443 already in use
+  when: k3s_service_status.status.ActiveState != "active"
+  tags: [master, verify]
+
+- name: Wait for K3s nodes to be ready
+  shell: kubectl get nodes --no-headers | grep -c " Ready"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: ready_nodes
+  until: ready_nodes.stdout | int >= 1
+  retries: 30
+  delay: 10
+  changed_when: false
+  tags: [master, verify]
+
+- name: Get cluster info
+  command: kubectl cluster-info
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: cluster_info
+  changed_when: false
+  tags: [master, verify]
+
+- name: Show cluster info
+  debug:
+    var: cluster_info.stdout_lines
+  tags: [master, verify]

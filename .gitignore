@@ -1,0 +1,20 @@
+# Kubeconfig file (contains cluster credentials)
+kubeconfig
+
+# Ansible retry files
+*.retry
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

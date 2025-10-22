@@ -1,0 +1,34 @@
+---
+# Check what's happening on workers
+- name: Diagnose Worker Installation
+  hosts: workers
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Check for running k3s processes
+      shell: ps aux | grep k3s | grep -v grep || echo "No k3s processes"
+      register: k3s_processes
+      changed_when: false
+
+    - name: Display k3s processes
+      debug:
+        msg: "{{ k3s_processes.stdout_lines }}"
+
+    - name: Check k3s-agent service status
+      shell: systemctl status k3s-agent --no-pager || echo "Service not found"
+      register: agent_status
+      changed_when: false
+
+    - name: Display agent status
+      debug:
+        msg: "{{ agent_status.stdout_lines }}"
+
+    - name: Get recent k3s-agent logs
+      shell: journalctl -u k3s-agent -n 50 --no-pager || echo "No logs"
+      register: agent_logs
+      changed_when: false
+
+    - name: Display agent logs
+      debug:
+        msg: "{{ agent_logs.stdout_lines }}"

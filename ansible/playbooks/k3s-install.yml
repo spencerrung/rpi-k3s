@@ -1,0 +1,139 @@
+---
+# K3s Cluster Installation Playbook
+# Sets up a complete K3s Kubernetes cluster on Raspberry Pi nodes
+
+# ============================================================================
+# Prerequisites - Run on all nodes
+# ============================================================================
+- name: Prepare all nodes for K3s installation
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Include prerequisites tasks
+      include_tasks: ../tasks/prerequisites.yml
+
+# ============================================================================
+# Master Node Setup
+# ============================================================================
+- name: Setup K3s master node
+  hosts: master
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Include master setup tasks
+      include_tasks: ../tasks/master-setup.yml
+
+# ============================================================================
+# Worker Node Setup
+# ============================================================================
+- name: Setup K3s worker nodes
+  hosts: workers
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Include worker setup tasks
+      include_tasks: ../tasks/worker-setup.yml
+
+# ============================================================================
+# Cluster Verification
+# ============================================================================
+- name: Verify K3s cluster status
+  hosts: master
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Wait for all nodes to join
+      shell: kubectl get nodes --no-headers | wc -l
+      register: node_count
+      until: node_count.stdout | int == groups['k3s_cluster'] | length
+      retries: 30
+      delay: 10
+      changed_when: false
+      tags: [verify]
+
+    - name: Get all nodes status
+      command: kubectl get nodes -o wide
+      register: nodes_status
+      changed_when: false
+      tags: [verify]
+
+    - name: Show cluster nodes
+      debug:
+        msg: "{{ nodes_status.stdout_lines }}"
+      tags: [verify]
+
+    - name: Get cluster component status
+      command: kubectl get componentstatuses
+      register: component_status
+      changed_when: false
+      failed_when: false
+      tags: [verify]
+
+    - name: Show component status
+      debug:
+        msg: "{{ component_status.stdout_lines }}"
+      when: component_status.rc == 0
+      tags: [verify]
+
+    - name: Get all pods in kube-system
+      command: kubectl get pods -n kube-system
+      register: system_pods
+      changed_when: false
+      tags: [verify]
+
+    - name: Show system pods
+      debug:
+        msg: "{{ system_pods.stdout_lines }}"
+      tags: [verify]
+
+    - name: Fetch kubeconfig to local machine
+      fetch:
+        src: /home/pi/.kube/config
+        dest: "{{ playbook_dir }}/../kubeconfig"
+        flat: yes
+      tags: [verify, kubeconfig]
+
+    - name: Display local kubeconfig path
+      debug:
+        msg: "Kubeconfig downloaded to: {{ playbook_dir }}/../kubeconfig"
+      tags: [verify, kubeconfig]
+
+    - name: Show completion message
+      debug:
+        msg: |
+          ✅ K3s Kubernetes Cluster Deployed Successfully!
+
+          📊 Cluster Information:
+          - Master Node: {{ k3s_master_ip }}
+          - Total Nodes: {{ groups['k3s_cluster'] | length }}
+          - Workers: {{ groups['workers'] | length }}
+          - Version: {{ k3s_version }}
+
+          🔧 Access Cluster:
+          - SSH to master: ssh pi@{{ k3s_master_ip }}
+          - Run: kubectl get nodes
+          - Kubeconfig on master: /home/pi/.kube/config
+          - Kubeconfig local: {{ playbook_dir }}/../kubeconfig
+
+          💻 Use Local Kubeconfig:
+          - export KUBECONFIG={{ playbook_dir }}/../kubeconfig
+          - kubectl get nodes
+          - kubectl get pods -A
+
+          📋 Next Steps:
+          1. Test deployment: kubectl run nginx --image=nginx --port=80
+          2. Check pods: kubectl get pods
+          3. Delete test: kubectl delete pod nginx
+          4. Install apps with Helm or kubectl
+
+          🔍 Useful Commands:
+          - kubectl get nodes -o wide
+          - kubectl get pods -A
+          - kubectl cluster-info
+          - k3s kubectl top nodes (resource usage)
+      tags: [verify]

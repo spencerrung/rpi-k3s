@@ -1,0 +1,136 @@
+---
+# K3s Cluster Reset Playbook
+# Completely removes K3s from all nodes for clean reinstallation
+
+# ============================================================================
+# Reset Worker Nodes First
+# ============================================================================
+- name: Reset K3s worker nodes
+  hosts: workers
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Check if K3s agent uninstall script exists
+      stat:
+        path: /usr/local/bin/k3s-agent-uninstall.sh
+      register: k3s_agent_uninstall
+      tags: [reset, worker]
+
+    - name: Stop and uninstall K3s agent
+      command: /usr/local/bin/k3s-agent-uninstall.sh
+      when: k3s_agent_uninstall.stat.exists
+      tags: [reset, worker]
+
+    - name: Remove K3s agent files using shell
+      shell: rm -rf {{ item }}
+      loop:
+        - /usr/local/bin/k3s
+        - /usr/local/bin/kubectl
+        - /usr/local/bin/crictl
+        - /etc/rancher
+        - /var/lib/rancher
+      failed_when: false
+      tags: [reset, worker]
+
+# ============================================================================
+# Reset Master Node
+# ============================================================================
+- name: Reset K3s master node
+  hosts: master
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Check if K3s uninstall script exists
+      stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: k3s_uninstall
+      tags: [reset, master]
+
+    - name: Stop and uninstall K3s server
+      command: /usr/local/bin/k3s-uninstall.sh
+      when: k3s_uninstall.stat.exists
+      tags: [reset, master]
+
+    - name: Remove K3s server files using shell
+      shell: rm -rf {{ item }}
+      loop:
+        - /usr/local/bin/k3s
+        - /usr/local/bin/kubectl
+        - /usr/local/bin/crictl
+        - /etc/rancher
+        - /var/lib/rancher
+        - /home/pi/.kube
+      failed_when: false
+      tags: [reset, master]
+
+    - name: Remove K3s configuration from bashrc
+      lineinfile:
+        path: /home/pi/.bashrc
+        regexp: "{{ item }}"
+        state: absent
+      loop:
+        - '^export KUBECONFIG='
+        - '^source <\(kubectl completion bash\)'
+        - '^alias k=kubectl'
+      tags: [reset, master]
+
+# ============================================================================
+# Cleanup All Nodes
+# ============================================================================
+- name: Cleanup all nodes
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Kill any remaining K3s processes
+      shell: |
+        pkill -9 -f k3s || true
+        pkill -9 -f containerd || true
+      changed_when: false
+      failed_when: false
+      tags: [reset, cleanup]
+
+    - name: Remove K3s kernel modules configuration
+      file:
+        path: /etc/modules-load.d/k3s.conf
+        state: absent
+      tags: [reset, cleanup]
+
+    - name: Remove K3s sysctl configuration
+      file:
+        path: /etc/sysctl.d/k3s.conf
+        state: absent
+      tags: [reset, cleanup]
+
+    - name: Remove CNI plugins
+      file:
+        path: /opt/cni
+        state: absent
+      tags: [reset, cleanup]
+
+    - name: Remove container networking
+      file:
+        path: /etc/cni
+        state: absent
+      tags: [reset, cleanup]
+
+    - name: Show completion message
+      debug:
+        msg: |
+          ✅ K3s Cluster Reset Complete!
+
+          🧹 All K3s components have been removed from all nodes.
+
+          📋 Next Steps:
+          1. Optionally reboot nodes: ansible k3s_cluster -i inventory.yml -m reboot --become
+          2. Reinstall cluster: ansible-playbook -i inventory.yml playbooks/k3s-install.yml
+
+          ⚠️  Note: Prerequisites (cgroups, iptables) are preserved.
+          If you want to remove those too, you'll need to manually edit:
+          - /boot/firmware/cmdline.txt (remove cgroup parameters)
+          - Reset iptables alternatives if needed
+      run_once: true
+      tags: [reset, status]

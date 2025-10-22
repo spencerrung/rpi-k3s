@@ -1,0 +1,69 @@
+---
+# K3s Worker Node Setup Tasks
+# Installs and configures K3s agents (worker nodes)
+
+- name: Check if K3s agent service exists
+  stat:
+    path: /etc/systemd/system/k3s-agent.service
+  register: k3s_agent_service
+  tags: [worker, install]
+
+- name: Check if K3s agent is already installed
+  stat:
+    path: /usr/local/bin/k3s
+  register: k3s_agent_installed
+  tags: [worker, install]
+
+- name: Check K3s agent version if installed
+  command: k3s --version
+  register: k3s_agent_current_version
+  changed_when: false
+  failed_when: false
+  when: k3s_agent_installed.stat.exists
+  tags: [worker, install]
+
+- name: Force installation if binary exists but service is missing
+  set_fact:
+    force_worker_install: true
+  when:
+    - k3s_agent_installed.stat.exists
+    - not k3s_agent_service.stat.exists
+  tags: [worker, install]
+
+- name: Install K3s agent on worker node
+  shell: "{{ k3s_worker_install_cmd }}"
+  register: k3s_agent_install
+  when: not k3s_agent_installed.stat.exists or k3s_version not in k3s_agent_current_version.stdout or force_worker_install | default(false)
+  tags: [worker, install]
+
+- name: Enable and start K3s agent service
+  systemd:
+    name: k3s-agent
+    enabled: yes
+    state: started
+  tags: [worker, service]
+
+- name: Wait for K3s agent to register with master
+  wait_for:
+    timeout: 30
+  changed_when: false
+  tags: [worker, service]
+
+- name: Verify K3s agent service is running
+  systemd:
+    name: k3s-agent
+    state: started
+  register: agent_status
+  tags: [worker, verify]
+
+- name: Check K3s agent process is active
+  shell: systemctl is-active k3s-agent
+  register: agent_active
+  changed_when: false
+  failed_when: agent_active.stdout != "active"
+  tags: [worker, verify]
+
+- name: Show K3s agent status
+  debug:
+    msg: "K3s agent is {{ agent_active.stdout }} on {{ inventory_hostname }}"
+  tags: [worker, verify]

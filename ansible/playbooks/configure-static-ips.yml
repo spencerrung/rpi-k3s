@@ -1,0 +1,116 @@
+---
+# Static IP Configuration Playbook
+# Sets up static IP addresses on all Raspberry Pi nodes for production stability
+# Run this BEFORE k3s-install.yml to ensure IPs don't change on reboot
+
+- name: Configure static IP addresses on all nodes
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Gather network interface information
+      set_fact:
+        primary_interface: "{{ ansible_default_ipv4.interface }}"
+        current_ip: "{{ ansible_host }}"
+        current_gateway: "{{ ansible_default_ipv4.gateway }}"
+        current_netmask: "{{ ansible_default_ipv4.netmask }}"
+      tags: [network, info]
+
+    - name: Display current network configuration
+      debug:
+        msg: |
+          Host: {{ inventory_hostname }}
+          Interface: {{ primary_interface }}
+          Current IP: {{ current_ip }}
+          Gateway: {{ current_gateway }}
+          Netmask: {{ current_netmask }}
+      tags: [network, info]
+
+    - name: Backup existing dhcpcd.conf
+      copy:
+        src: /etc/dhcpcd.conf
+        dest: /etc/dhcpcd.conf.backup
+        remote_src: yes
+        force: no
+      tags: [network, backup]
+
+    - name: Remove any existing static IP configuration for this interface
+      lineinfile:
+        path: /etc/dhcpcd.conf
+        regexp: "{{ item }}"
+        state: absent
+      loop:
+        - '^interface {{ primary_interface }}$'
+        - '^static ip_address='
+        - '^static routers='
+        - '^static domain_name_servers='
+      tags: [network, config]
+
+    - name: Configure static IP in dhcpcd.conf
+      blockinfile:
+        path: /etc/dhcpcd.conf
+        marker: "# {mark} ANSIBLE MANAGED BLOCK - {{ inventory_hostname }}"
+        block: |
+          # Static IP configuration for {{ inventory_hostname }}
+          interface {{ primary_interface }}
+          static ip_address={{ current_ip }}/24
+          static routers={{ current_gateway }}
+          static domain_name_servers={{ dns_servers | default('8.8.8.8 8.8.4.4') }}
+      notify: restart dhcpcd
+      tags: [network, config]
+
+    - name: Verify dhcpcd.conf syntax
+      command: cat /etc/dhcpcd.conf
+      register: dhcpcd_content
+      changed_when: false
+      tags: [network, verify]
+
+    - name: Show configured static IP
+      debug:
+        msg: "Static IP {{ current_ip }}/24 configured for {{ inventory_hostname }} on {{ primary_interface }}"
+      tags: [network, verify]
+
+  handlers:
+    - name: restart dhcpcd
+      systemd:
+        name: dhcpcd
+        state: restarted
+      tags: [network, service]
+
+- name: Verify static IP configuration
+  hosts: k3s_cluster
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Wait for network service to stabilize
+      pause:
+        seconds: 5
+      tags: [verify]
+
+    - name: Test connectivity to all nodes
+      ping:
+        data: verify
+      tags: [verify]
+
+    - name: Show completion message
+      debug:
+        msg: |
+          ✅ Static IP Configuration Complete!
+
+          📊 Configured Nodes:
+          {% for host in groups['k3s_cluster'] %}
+          - {{ host }}: {{ hostvars[host]['ansible_host'] }}
+          {% endfor %}
+
+          ⚠️  IMPORTANT:
+          - Static IPs are now configured in /etc/dhcpcd.conf
+          - IPs will persist across reboots
+          - If you need to change IPs, update inventory.yml and rerun this playbook
+
+          📋 Next Steps:
+          1. Verify all nodes are accessible: ansible k3s_cluster -i inventory.yml -m ping
+          2. Proceed with K3s installation: ansible-playbook -i inventory.yml playbooks/k3s-install.yml
+      run_once: true
+      tags: [verify]

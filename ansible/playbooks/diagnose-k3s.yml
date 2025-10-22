@@ -1,0 +1,116 @@
+---
+# K3s Diagnostic Playbook
+# Quick diagnostics to check K3s installation status
+
+- name: Diagnose K3s Installation
+  hosts: master
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Check K3s service status
+      systemd:
+        name: k3s
+      register: k3s_service
+      failed_when: false
+
+    - name: Display K3s service status
+      debug:
+        msg: |
+          Service Status: {{ k3s_service.status.ActiveState }}
+          Sub-State: {{ k3s_service.status.SubState }}
+          Loaded: {{ k3s_service.status.LoadState }}
+
+    - name: Get K3s service logs (last 100 lines)
+      command: journalctl -u k3s -n 100 --no-pager
+      register: k3s_logs
+      changed_when: false
+
+    - name: Display K3s logs
+      debug:
+        msg: "{{ k3s_logs.stdout_lines }}"
+
+    - name: Check if K3s binary exists
+      stat:
+        path: /usr/local/bin/k3s
+      register: k3s_binary
+
+    - name: Display K3s binary status
+      debug:
+        msg: "K3s binary exists: {{ k3s_binary.stat.exists }}"
+
+    - name: Check K3s version
+      command: /usr/local/bin/k3s --version
+      register: k3s_version
+      when: k3s_binary.stat.exists
+      changed_when: false
+      failed_when: false
+
+    - name: Display K3s version
+      debug:
+        msg: "{{ k3s_version.stdout }}"
+      when: k3s_binary.stat.exists
+
+    - name: Check kernel cmdline for cgroups
+      command: cat /proc/cmdline
+      register: proc_cmdline
+      changed_when: false
+
+    - name: Display kernel cmdline
+      debug:
+        msg: "{{ proc_cmdline.stdout }}"
+
+    - name: Check if cgroups are enabled
+      set_fact:
+        cgroups_enabled: "{{ 'cgroup_memory=1' in proc_cmdline.stdout and 'cgroup_enable=memory' in proc_cmdline.stdout }}"
+
+    - name: Display cgroup status
+      debug:
+        msg: "Cgroups enabled: {{ cgroups_enabled }}"
+
+    - name: Check for iptables tools
+      command: which {{ item }}
+      loop:
+        - iptables-save
+        - iptables-restore
+        - ip6tables-save
+        - ip6tables-restore
+      register: iptables_tools
+      changed_when: false
+      failed_when: false
+
+    - name: Display iptables tools status
+      debug:
+        msg: "{{ item.item }}: {{ 'Found' if item.rc == 0 else 'NOT FOUND' }}"
+      loop: "{{ iptables_tools.results }}"
+
+    - name: Check port 6443 usage
+      command: ss -tlnp | grep 6443
+      register: port_6443
+      changed_when: false
+      failed_when: false
+
+    - name: Display port 6443 status
+      debug:
+        msg: "{{ 'Port 6443 in use' if port_6443.rc == 0 else 'Port 6443 available' }}"
+
+    - name: Summary
+      debug:
+        msg: |
+          ========================================
+          K3S DIAGNOSTIC SUMMARY
+          ========================================
+          Service Active: {{ k3s_service.status.ActiveState }}
+          K3s Binary: {{ 'Installed' if k3s_binary.stat.exists else 'NOT INSTALLED' }}
+          Cgroups: {{ 'Enabled' if cgroups_enabled else 'DISABLED - THIS IS THE PROBLEM!' }}
+          Port 6443: {{ 'In Use' if port_6443.rc == 0 else 'Available' }}
+
+          {% if not cgroups_enabled %}
+          ACTION REQUIRED: Cgroups are not enabled!
+          Current cmdline: {{ proc_cmdline.stdout }}
+
+          You need to:
+          1. Update netboot cmdline.txt with cgroup parameters
+          2. Reboot all Pis
+          3. Rerun K3s installation
+          {% endif %}

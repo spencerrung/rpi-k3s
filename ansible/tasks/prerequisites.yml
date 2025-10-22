@@ -1,0 +1,277 @@
+---
+# System Prerequisites Tasks
+# Prepares Raspberry Pi nodes for K3s installation
+
+# Basic APT cleanup - keeps system healthy without being overly aggressive
+- name: Clean apt cache
+  apt:
+    autoclean: yes
+  tags: [prereqs, apt]
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  retries: 3
+  delay: 5
+  register: apt_update
+  until: apt_update is success
+  tags: [prereqs, apt]
+
+- name: Install required packages
+  apt:
+    name: "{{ required_packages }}"
+    state: present
+  retries: 3
+  delay: 5
+  register: package_install
+  until: package_install is success
+  tags: [prereqs, packages]
+
+- name: Check if system is network booting
+  stat:
+    path: /proc/cmdline
+  register: proc_cmdline_file
+  tags: [prereqs, cgroups]
+
+- name: Read current kernel command line
+  command: cat /proc/cmdline
+  register: running_cmdline
+  changed_when: false
+  tags: [prereqs, cgroups]
+
+- name: Detect network boot
+  set_fact:
+    is_netboot: "{{ 'nfs' in running_cmdline.stdout or 'nfsroot' in running_cmdline.stdout }}"
+  tags: [prereqs, cgroups]
+
+- name: Display boot type
+  debug:
+    msg: |
+      System boot type: {{ 'Network Boot (NFS)' if is_netboot else 'Local Boot' }}
+      {% if is_netboot %}
+      WARNING: This system is network booting. Cgroup configuration must be set
+      in the netboot server's cmdline.txt template, not on the Pi itself.
+
+      Please ensure your netboot project has cgroup parameters configured.
+      {% endif %}
+  tags: [prereqs, cgroups]
+
+- name: Fail if netboot and cgroups not enabled
+  fail:
+    msg: |
+      ❌ Network Boot Detected - Cgroups Not Enabled!
+
+      Your Raspberry Pis are network booting but cgroups are not configured.
+      Current cmdline: {{ running_cmdline.stdout }}
+
+      To fix this, update your rpi-netboot project:
+
+      1. Edit: rpi-netboot/ansible/group_vars/all.yml
+         Add under kernel_cmdline:
+           cgroup_enable_cpuset: true
+           cgroup_memory: 1
+           cgroup_enable_memory: true
+
+      2. Update the template: rpi-netboot/ansible/templates/cmdline.txt.j2
+         Add cgroup parameters to the kernel cmdline
+
+      3. Redeploy the netboot configuration:
+         cd rpi-netboot/ansible
+         ansible-playbook -i inventory.yml playbooks/rpi-netboot.yml
+
+      4. Reboot all Raspberry Pis
+
+      5. Then rerun this K3s installation playbook
+  when:
+    - enable_cgroups
+    - is_netboot
+    - "'cgroup_memory=1' not in running_cmdline.stdout or 'cgroup_enable=memory' not in running_cmdline.stdout"
+  tags: [prereqs, cgroups]
+
+- name: Configure cgroups for local boot (non-netboot)
+  block:
+    - name: Read current cmdline.txt
+      command: cat /boot/firmware/cmdline.txt
+      register: cmdline_current
+      changed_when: false
+
+    - name: Remove cgroup_disable if present
+      replace:
+        path: /boot/firmware/cmdline.txt
+        regexp: 'cgroup_disable=\S+\s*'
+        replace: ''
+      when: "'cgroup_disable' in cmdline_current.stdout"
+      register: cgroup_disable_removed
+
+    - name: Check if cgroups are already enabled in cmdline.txt
+      shell: grep -q "cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory" /boot/firmware/cmdline.txt
+      register: cgroups_check
+      failed_when: false
+      changed_when: false
+
+    - name: Enable cgroups in boot cmdline
+      lineinfile:
+        path: /boot/firmware/cmdline.txt
+        backrefs: yes
+        regexp: '^(.*rootwait.*)$'
+        line: '\1 {{ cmdline_extra }}'
+      when: cgroups_check.rc != 0
+      register: cgroups_enabled
+
+    - name: Reboot if cgroups configuration changed
+      reboot:
+        msg: "Rebooting to apply cgroup configuration"
+        reboot_timeout: 300
+      when: cgroups_enabled is changed or cgroup_disable_removed is changed
+
+    - name: Wait for system to come back online
+      wait_for_connection:
+        delay: 10
+        timeout: 300
+      when: cgroups_enabled is changed or cgroup_disable_removed is changed
+  when:
+    - enable_cgroups
+    - not is_netboot
+  tags: [prereqs, cgroups]
+
+- name: Verify cgroups are enabled in cmdline
+  command: cat /proc/cmdline
+  register: proc_cmdline
+  changed_when: false
+  tags: [prereqs, cgroups, verify]
+
+- name: Display current kernel command line
+  debug:
+    msg: "Current cmdline: {{ proc_cmdline.stdout }}"
+  tags: [prereqs, cgroups, verify]
+
+- name: Verify memory cgroup is mounted
+  shell: mount | grep cgroup | grep memory || echo "NOT_MOUNTED"
+  register: cgroup_mount
+  changed_when: false
+  tags: [prereqs, cgroups, verify]
+
+- name: Fail if cgroups are not properly configured
+  fail:
+    msg: |
+      Memory cgroups are not properly enabled!
+      Current cmdline: {{ proc_cmdline.stdout }}
+      Cgroup mount: {{ cgroup_mount.stdout }}
+
+      Please manually check /boot/firmware/cmdline.txt and ensure it contains:
+      cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory
+
+      Then reboot the system manually.
+  when:
+    - enable_cgroups
+    - "'cgroup_memory=1' not in proc_cmdline.stdout or 'cgroup_enable=memory' not in proc_cmdline.stdout"
+  tags: [prereqs, cgroups, verify]
+
+- name: Load required kernel modules
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ required_modules }}"
+  tags: [prereqs, kernel]
+
+- name: Ensure kernel modules load on boot
+  lineinfile:
+    path: /etc/modules-load.d/k3s.conf
+    line: "{{ item }}"
+    create: yes
+    mode: '0644'
+  loop: "{{ required_modules }}"
+  tags: [prereqs, kernel]
+
+- name: Set sysctl parameters
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/k3s.conf
+    reload: yes
+  loop: "{{ sysctl_settings | dict2items }}"
+  tags: [prereqs, sysctl]
+
+- name: Disable swap
+  command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+  tags: [prereqs, swap]
+
+- name: Remove swap from fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: '\sswap\s'
+    state: absent
+  tags: [prereqs, swap]
+
+- name: Check if iptables-legacy exists
+  stat:
+    path: /usr/sbin/iptables-legacy
+  register: iptables_legacy
+  tags: [prereqs, iptables]
+
+- name: Check current iptables alternative
+  command: update-alternatives --query iptables
+  register: iptables_current
+  failed_when: false
+  changed_when: false
+  when: iptables_legacy.stat.exists
+  tags: [prereqs, iptables]
+
+- name: Switch to iptables-legacy (required for Raspberry Pi OS)
+  command: update-alternatives --set iptables /usr/sbin/iptables-legacy
+  when:
+    - iptables_legacy.stat.exists
+    - iptables_current.rc == 0
+    - "'iptables-legacy' not in iptables_current.stdout or 'Value: /usr/sbin/iptables-legacy' not in iptables_current.stdout"
+  failed_when: false
+  tags: [prereqs, iptables]
+
+- name: Switch to ip6tables-legacy
+  command: update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+  when: iptables_legacy.stat.exists
+  failed_when: false
+  tags: [prereqs, iptables]
+
+- name: Create symlinks for iptables-save/restore tools
+  file:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    state: link
+    force: yes
+  loop:
+    - { src: '/usr/sbin/iptables-legacy-save', dest: '/usr/sbin/iptables-save' }
+    - { src: '/usr/sbin/iptables-legacy-restore', dest: '/usr/sbin/iptables-restore' }
+    - { src: '/usr/sbin/ip6tables-legacy-save', dest: '/usr/sbin/ip6tables-save' }
+    - { src: '/usr/sbin/ip6tables-legacy-restore', dest: '/usr/sbin/ip6tables-restore' }
+  tags: [prereqs, iptables]
+
+- name: Create K3s data directory
+  file:
+    path: "{{ k3s_data_dir }}"
+    state: directory
+    mode: '0755'
+  tags: [prereqs, storage]
+
+- name: Check if K3s data directory is on NFS
+  command: df -T {{ k3s_data_dir }}
+  register: df_output
+  changed_when: false
+  tags: [prereqs, storage]
+
+- name: Warn if using NFS for K3s data
+  debug:
+    msg: |
+      WARNING: K3s data directory appears to be on NFS!
+      {{ df_output.stdout }}
+
+      For production use, consider:
+      1. Using tmpfs (fast but not persistent)
+      2. Using a USB drive or local SD card
+      3. Using iSCSI or other block storage
+
+      K3s performance will be degraded on NFS.
+  when: "'nfs' in df_output.stdout.lower()"
+  tags: [prereqs, storage]

@@ -1,0 +1,36 @@
+---
+# Check K3s startup logs in real-time
+- name: Monitor K3s Startup
+  hosts: master
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Get recent K3s logs
+      command: journalctl -u k3s -n 200 --no-pager
+      register: k3s_logs
+      changed_when: false
+
+    - name: Display K3s logs
+      debug:
+        msg: "{{ k3s_logs.stdout_lines }}"
+
+    - name: Check if K3s is still starting
+      shell: systemctl is-active k3s
+      register: k3s_status
+      changed_when: false
+      failed_when: false
+
+    - name: Display current status
+      debug:
+        msg: "K3s service status: {{ k3s_status.stdout }}"
+
+    - name: Check if API server is responding
+      command: kubectl get nodes --kubeconfig /etc/rancher/k3s/k3s.yaml
+      register: kubectl_test
+      changed_when: false
+      failed_when: false
+
+    - name: Display kubectl result
+      debug:
+        msg: "{{ 'API server is UP! Nodes: ' + kubectl_test.stdout if kubectl_test.rc == 0 else 'API server not ready yet: ' + kubectl_test.stderr }}"
