@@ -1,0 +1,159 @@
+---
+# K3s Additional Master Node Setup Tasks
+# Joins additional master nodes to existing K3s cluster for HA
+
+- name: Check if K3s is already installed
+  stat:
+    path: /usr/local/bin/k3s
+  register: k3s_installed
+  tags: [additional_master, install]
+
+- name: Check K3s version if installed
+  command: k3s --version
+  register: k3s_current_version
+  changed_when: false
+  failed_when: false
+  when: k3s_installed.stat.exists
+  tags: [additional_master, install]
+
+- name: Check if this node is already a server
+  stat:
+    path: /etc/systemd/system/k3s.service
+  register: k3s_server_service
+  tags: [additional_master, install]
+
+- name: Verify primary master is accessible
+  wait_for:
+    host: "{{ k3s_master_ip }}"
+    port: "{{ k3s_api_port }}"
+    timeout: 30
+  tags: [additional_master, verify]
+
+- name: Install K3s server on additional master node
+  shell: "{{ k3s_additional_master_install_cmd }}"
+  register: k3s_server_install
+  when: not k3s_server_service.stat.exists or k3s_version not in k3s_current_version.stdout
+  tags: [additional_master, install]
+
+- name: Wait for K3s to be ready
+  wait_for:
+    path: /etc/rancher/k3s/k3s.yaml
+    timeout: 120
+  when: k3s_server_install is changed
+  tags: [additional_master, install]
+
+- name: Enable and start K3s service
+  systemd:
+    name: k3s
+    enabled: yes
+    state: started
+  tags: [additional_master, service]
+
+- name: Wait for K3s API server to be ready on this node
+  wait_for:
+    host: "{{ ansible_host }}"
+    port: "{{ k3s_api_port }}"
+    timeout: 120
+  tags: [additional_master, service]
+
+- name: Create .kube directory for pi user
+  file:
+    path: /home/pi/.kube
+    state: directory
+    owner: pi
+    group: pi
+    mode: '0755'
+  tags: [additional_master, config]
+
+- name: Copy kubeconfig to pi user
+  copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: /home/pi/.kube/config
+    remote_src: yes
+    owner: pi
+    group: pi
+    mode: '0600'
+  tags: [additional_master, config]
+
+- name: Update kubeconfig server address
+  lineinfile:
+    path: /home/pi/.kube/config
+    regexp: '^\s+server:\s+https://.*:6443'
+    line: "    server: https://{{ k3s_master_ip }}:{{ k3s_api_port }}"
+    backrefs: yes
+  tags: [additional_master, config]
+
+- name: Set KUBECONFIG environment variable
+  lineinfile:
+    path: /home/pi/.bashrc
+    line: 'export KUBECONFIG=/home/pi/.kube/config'
+    state: present
+  tags: [additional_master, config]
+
+- name: Install kubectl completion
+  lineinfile:
+    path: /home/pi/.bashrc
+    line: 'source <(kubectl completion bash)'
+    state: present
+  when: install_kubectl_completion
+  tags: [additional_master, config]
+
+- name: Add kubectl alias
+  lineinfile:
+    path: /home/pi/.bashrc
+    line: 'alias k=kubectl'
+    state: present
+  tags: [additional_master, config]
+
+- name: Check K3s service status
+  systemd:
+    name: k3s
+  register: k3s_service_status
+  tags: [additional_master, verify]
+
+- name: Get K3s service logs if not running
+  command: journalctl -u k3s -n 50 --no-pager
+  register: k3s_logs
+  when: k3s_service_status.status.ActiveState != "active"
+  tags: [additional_master, verify]
+
+- name: Display K3s logs if service failed
+  debug:
+    msg: "{{ k3s_logs.stdout_lines }}"
+  when: k3s_service_status.status.ActiveState != "active"
+  tags: [additional_master, verify]
+
+- name: Fail if K3s service is not running
+  fail:
+    msg: |
+      K3s service is not running on {{ inventory_hostname }}!
+      Status: {{ k3s_service_status.status.ActiveState }}
+      SubState: {{ k3s_service_status.status.SubState }}
+
+      Check the logs above for errors.
+  when: k3s_service_status.status.ActiveState != "active"
+  tags: [additional_master, verify]
+
+- name: Wait for node to be ready
+  shell: kubectl get nodes {{ inventory_hostname }} --no-headers 2>/dev/null | grep -c " Ready" || echo "0"
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: node_ready
+  until: node_ready.stdout | int == 1
+  retries: 30
+  delay: 10
+  changed_when: false
+  tags: [additional_master, verify]
+
+- name: Get node info
+  command: kubectl get nodes {{ inventory_hostname }} -o wide
+  environment:
+    KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+  register: node_info
+  changed_when: false
+  tags: [additional_master, verify]
+
+- name: Show node info
+  debug:
+    var: node_info.stdout_lines
+  tags: [additional_master, verify]

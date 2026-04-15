@@ -111,7 +111,7 @@
           📊 Cluster Information:
           - Master Node: {{ k3s_master_ip }}
           - Total Nodes: {{ groups['k3s_cluster'] | length }}
-          - Workers: {{ groups['workers'] | length }}
+          - Workers: {{ groups['workers'] | default([]) | length }}
           - Version: {{ k3s_version }}
 
           🔧 Access Cluster:

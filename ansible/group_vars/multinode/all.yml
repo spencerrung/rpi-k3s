@@ -1,0 +1,144 @@
+---
+# Multi-Node RPi K3s Cluster Configuration
+# 1 Master + 4+ Workers for production workloads
+
+# ============================================================================
+# Ansible Configuration
+# ============================================================================
+ansible_python_interpreter: auto
+
+# ============================================================================
+# Cluster Identity
+# ============================================================================
+cluster_type: multinode
+cluster_name: rpi-cluster
+cluster_domain: cluster.local
+
+# ============================================================================
+# K3s Version and Installation
+# ============================================================================
+k3s_version: v1.29.10+k3s1
+k3s_install_url: https://get.k3s.io
+
+# ============================================================================
+# Network Configuration
+# ============================================================================
+k3s_master_ip: "{{ hostvars[groups['master'][0]]['ansible_host'] }}"
+k3s_api_port: 6443
+
+# Cluster networking
+k3s_cluster_cidr: "10.42.0.0/16"  # Pod network CIDR
+k3s_service_cidr: "10.43.0.0/16"  # Service network CIDR
+k3s_cluster_dns: "10.43.0.10"     # CoreDNS service IP
+k3s_flannel_backend: vxlan
+
+# ============================================================================
+# K3s Data Directory (must be local storage, not NFS!)
+# ============================================================================
+k3s_data_dir: "/var/lib/rancher/k3s"
+
+# ============================================================================
+# K3s Master Configuration (HA Ready)
+# ============================================================================
+# High Availability Configuration
+k3s_ha_mode: true  # Enabled for HA with multiple masters
+
+k3s_master_args:
+  - "--cluster-init"                 # Enable embedded etcd for HA
+  - "--disable=traefik"              # Disable default Traefik
+  - "--disable=servicelb"            # Disable ServiceLB
+  - "--write-kubeconfig-mode=644"    # Make kubeconfig readable
+  - "--cluster-cidr={{ k3s_cluster_cidr }}"
+  - "--service-cidr={{ k3s_service_cidr }}"
+  - "--flannel-backend={{ k3s_flannel_backend }}"
+  - "--node-taint CriticalAddonsOnly=true:NoExecute"  # Don't schedule pods on master
+  - "--data-dir={{ k3s_data_dir }}"
+  - "--snapshotter=fuse-overlayfs"
+
+k3s_master_install_cmd: >-
+  curl -sfL {{ k3s_install_url }} |
+  INSTALL_K3S_VERSION={{ k3s_version }}
+  INSTALL_K3S_EXEC="server {{ k3s_master_args | join(' ') }}"
+  sh -
+
+# ============================================================================
+# Additional Master Configuration (for HA expansion)
+# ============================================================================
+k3s_additional_master_args:
+  - "--disable=traefik"
+  - "--disable=servicelb"
+  - "--write-kubeconfig-mode=644"
+  - "--cluster-cidr={{ k3s_cluster_cidr }}"
+  - "--service-cidr={{ k3s_service_cidr }}"
+  - "--flannel-backend={{ k3s_flannel_backend }}"
+  - "--node-taint CriticalAddonsOnly=true:NoExecute"
+  - "--data-dir={{ k3s_data_dir }}"
+  - "--snapshotter=fuse-overlayfs"
+  - "--server https://{{ k3s_master_ip }}:{{ k3s_api_port }}"
+
+k3s_additional_master_install_cmd: >-
+  curl -sfL {{ k3s_install_url }} |
+  INSTALL_K3S_VERSION={{ k3s_version }}
+  K3S_TOKEN={{ k3s_token }}
+  INSTALL_K3S_EXEC="server {{ k3s_additional_master_args | join(' ') }}"
+  sh -
+
+# ============================================================================
+# K3s Worker Configuration
+# ============================================================================
+k3s_worker_args:
+  - "--node-label worker=true"
+  - "--snapshotter=fuse-overlayfs"
+
+k3s_token_file: /var/lib/rancher/k3s/server/node-token
+
+k3s_worker_install_cmd: >-
+  curl -sfL {{ k3s_install_url }} |
+  INSTALL_K3S_VERSION={{ k3s_version }}
+  K3S_URL=https://{{ k3s_master_ip }}:{{ k3s_api_port }}
+  K3S_TOKEN={{ k3s_token }}
+  INSTALL_K3S_EXEC="agent {{ k3s_worker_args | join(' ') }}"
+  sh -
+
+# ============================================================================
+# System Prerequisites
+# ============================================================================
+required_packages:
+  - curl
+  - iptables
+  - conntrack
+  - iptables-persistent
+  - fuse-overlayfs
+
+required_modules:
+  - br_netfilter
+  - overlay
+  - ip_tables
+  - ip6_tables
+
+sysctl_settings:
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+  net.ipv4.ip_forward: 1
+
+# Cgroups configuration
+enable_cgroups: true
+cmdline_extra: "cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory"
+
+# ============================================================================
+# Storage Configuration
+# ============================================================================
+default_storage_class: local-path
+
+# ============================================================================
+# Optional Features
+# ============================================================================
+install_kubectl_completion: true
+install_k9s: false
+install_helm: true
+helm_version: v3.13.3
+
+# ============================================================================
+# Network Configuration for Static IPs
+# ============================================================================
+dns_servers: "8.8.8.8 8.8.4.4"

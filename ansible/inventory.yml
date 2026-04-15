@@ -1,33 +1,20 @@
 ---
 # Raspberry Pi K3s Cluster Inventory
-# Defines master and worker nodes for the Kubernetes cluster
+#
+# Select an inventory file based on your cluster type:
+#   ansible-playbook -i inventories/single-pi.yml playbooks/k3s-install.yml
+#   ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml
+#
+# See inventories/ directory for cluster definitions
+# See group_vars/ directory for cluster-specific configurations
 
 all:
   children:
     k3s_cluster:
       children:
         master:
-          hosts:
-            pi-01:
-              ansible_host: 10.10.10.230  # Serial: 94a418cd
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-
+          hosts: {}
         workers:
-          hosts:
-            pi-02:
-              ansible_host: 10.10.10.216  # Serial: 54ab2151 (was at .25, now at .216)
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-            pi-03:
-              ansible_host: 10.10.10.45  # Serial: 101af127
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-            pi-04:
-              ansible_host: 10.10.10.25  # Serial: c56a6028 (was at .148, now at .25)
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-            pi-05:
-              ansible_host: 10.10.10.148  # Serial: ea4cc994 (was at .216, now at .148)
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+          hosts: {}
+        additional_masters:
+          hosts: {}

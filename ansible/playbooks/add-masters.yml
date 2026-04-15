@@ -1,0 +1,215 @@
+---
+# Add Additional Master Nodes to K3s Cluster
+# This playbook adds new master nodes to an existing K3s cluster for HA
+#
+# Prerequisites:
+# 1. Existing K3s cluster must be running
+# 2. New nodes must be added to 'additional_masters' group in inventory.yml
+# 3. New nodes should have static IPs configured
+#
+# Usage:
+#   ansible-playbook -i ../inventory.yml add-masters.yml
+#
+# IMPORTANT: For proper HA, you should have an odd number of master nodes (3, 5, or 7)
+
+# ============================================================================
+# Prerequisites - Prepare new master nodes
+# ============================================================================
+- name: Prepare additional master nodes
+  hosts: additional_masters
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Check if additional_masters group has hosts
+      fail:
+        msg: |
+          No hosts found in 'additional_masters' group!
+
+          Please add new master nodes to the 'additional_masters' group in inventory.yml
+          Example:
+            additional_masters:
+              hosts:
+                pi-06:
+                  ansible_host: 10.10.10.XXX
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+      when: groups['additional_masters'] | length == 0
+      run_once: true
+
+    - name: Display master nodes to be added
+      debug:
+        msg: |
+          Adding {{ groups['additional_masters'] | length }} additional master node(s):
+          {% for host in groups['additional_masters'] %}
+          - {{ host }} ({{ hostvars[host]['ansible_host'] }})
+          {% endfor %}
+
+          Primary master: {{ groups['master'][0] }} ({{ k3s_master_ip }})
+      run_once: true
+
+  tasks:
+    - name: Include prerequisites tasks
+      include_tasks: ../tasks/prerequisites.yml
+
+# ============================================================================
+# Verify Primary Master and Get Token
+# ============================================================================
+- name: Verify primary master and retrieve cluster token
+  hosts: master
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Check if K3s is running on primary master
+      systemd:
+        name: k3s
+      register: primary_master_status
+
+    - name: Fail if primary master is not running
+      fail:
+        msg: |
+          K3s is not running on primary master {{ inventory_hostname }}!
+          Status: {{ primary_master_status.status.ActiveState }}
+
+          Please ensure the primary master is healthy before adding additional masters.
+      when: primary_master_status.status.ActiveState != "active"
+
+    - name: Get current cluster nodes
+      command: kubectl get nodes --no-headers
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: current_nodes
+      changed_when: false
+
+    - name: Display current cluster state
+      debug:
+        msg: |
+          Current cluster nodes:
+          {{ current_nodes.stdout }}
+
+    - name: Read K3s server token
+      slurp:
+        src: "{{ k3s_token_file }}"
+      register: k3s_token_raw
+
+    - name: Set K3s token fact for all hosts
+      set_fact:
+        k3s_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: yes
+      loop: "{{ groups['k3s_cluster'] + groups['additional_masters'] }}"
+
+# ============================================================================
+# Setup Additional Master Nodes
+# ============================================================================
+- name: Setup additional K3s master nodes
+  hosts: additional_masters
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Include additional master setup tasks
+      include_tasks: ../tasks/additional-master-setup.yml
+
+# ============================================================================
+# Verify Cluster HA Setup
+# ============================================================================
+- name: Verify HA cluster configuration
+  hosts: master
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Wait for all master nodes to join
+      shell: kubectl get nodes --no-headers | grep -E "control-plane|master" | grep -c " Ready"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: master_count
+      until: master_count.stdout | int == (groups['master'] | length + groups['additional_masters'] | length)
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Get all nodes status
+      command: kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: all_nodes_status
+      changed_when: false
+
+    - name: Get etcd member list
+      command: kubectl get endpoints -n kube-system k3s -o yaml
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: etcd_endpoints
+      changed_when: false
+      failed_when: false
+
+    - name: Show cluster configuration
+      debug:
+        msg: |
+
+          ✅ K3s HA Cluster Configuration Complete!
+
+          📊 Cluster Information:
+          - Master Nodes: {{ groups['master'] | length + groups['additional_masters'] | length }}
+          - Worker Nodes: {{ groups['workers'] | length }}
+          - Total Nodes: {{ groups['k3s_cluster'] | length + groups['additional_masters'] | length }}
+          - K3s Version: {{ k3s_version }}
+
+          🎯 Master Nodes:
+          {% for host in groups['master'] %}
+          - {{ host }} ({{ hostvars[host]['ansible_host'] }}) - Primary
+          {% endfor %}
+          {% for host in groups['additional_masters'] %}
+          - {{ host }} ({{ hostvars[host]['ansible_host'] }}) - Additional
+          {% endfor %}
+
+          📋 All Nodes:
+          {{ all_nodes_status.stdout }}
+
+          🔧 Next Steps:
+          1. Update your load balancer to include all master nodes
+          2. Configure your kubeconfig to use a load balancer endpoint
+          3. Test failover by stopping one master node
+          4. Monitor etcd health: kubectl get endpoints -n kube-system k3s
+
+          ⚠️  Important Notes:
+          - Always maintain an odd number of master nodes (3, 5, or 7)
+          - For production, use a load balancer in front of master nodes
+          - Workers and kubectl should connect via load balancer, not directly to one master
+          - Monitor etcd cluster health regularly
+
+          💡 Example Load Balancer Config (HAProxy):
+          frontend k3s-api
+            bind *:6443
+            mode tcp
+            option tcplog
+            default_backend k3s-masters
+
+          backend k3s-masters
+            mode tcp
+            balance roundrobin
+          {% for host in groups['master'] %}
+            server {{ host }} {{ hostvars[host]['ansible_host'] }}:6443 check
+          {% endfor %}
+          {% for host in groups['additional_masters'] %}
+            server {{ host }} {{ hostvars[host]['ansible_host'] }}:6443 check
+          {% endfor %}
+
+    - name: Verify etcd cluster health
+      command: kubectl exec -n kube-system $(kubectl get pods -n kube-system -l component=etcd -o name | head -1) -- etcdctl member list
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: etcd_members
+      changed_when: false
+      failed_when: false
+
+    - name: Show etcd member status
+      debug:
+        msg: |
+
+          🗄️  etcd Cluster Members:
+          {{ etcd_members.stdout if etcd_members.rc == 0 else "Unable to retrieve etcd member list" }}
+      when: etcd_members.rc == 0
