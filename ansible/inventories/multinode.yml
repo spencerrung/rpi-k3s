@@ -4,47 +4,42 @@
 
 all:
   children:
-    k3s_cluster:
+    multinode:
       children:
-        master:
-          hosts:
-            pi-01:
-              ansible_host: 10.10.10.230  # Serial: 94a418cd
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-              is_primary_master: true
+        k3s_cluster:
+          children:
+            master:
+              hosts:
+                pi-01:
+                  ansible_host: 10.10.10.230  # Serial: 94a418cd
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                  is_primary_master: true
 
-        workers:
-          hosts:
-            pi-02:
-              ansible_host: 10.10.10.216  # Serial: 54ab2151
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-            pi-03:
-              ansible_host: 10.10.10.45  # Serial: 101af127
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-            pi-04:
-              ansible_host: 10.10.10.25  # Serial: c56a6028
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-            pi-05:
-              ansible_host: 10.10.10.148  # Serial: ea4cc994
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-            pi-08:
-              ansible_host: 10.10.10.18
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+            workers:
+              hosts:
+                pi-02:
+                  ansible_host: 10.10.10.216  # Serial: 54ab2151
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                pi-03:
+                  ansible_host: 10.10.10.45  # Serial: 101af127
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                pi-04:
+                  ansible_host: 10.10.10.25  # Serial: c56a6028
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                pi-05:
+                  ansible_host: 10.10.10.148  # Serial: ea4cc994
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                pi-08:
+                  ansible_host: 10.10.10.18
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
 
-        # Uncomment to add additional masters for HA
-        # additional_masters:
-        #   hosts:
-        #     pi-06:
-        #       ansible_host: 10.10.10.218
-        #       ansible_user: pi
-        #       ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-        #     pi-07:
-        #       ansible_host: 10.10.10.122
-        #       ansible_user: pi
-        #       ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+        # Additional masters must be fresh nodes. Existing workers require the
+        # separately guarded promotion workflow.
+        additional_masters:
+          hosts: {}

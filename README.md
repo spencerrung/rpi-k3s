@@ -8,7 +8,7 @@ This project deploys a production-ready K3s Kubernetes cluster on Raspberry Pi 4
 - 1 Master Node (control plane) - **Can be scaled to 3, 5, or 7 for HA**
 - 4 Worker Nodes (easily scalable)
 - Automatic prerequisite configuration
-- Zero-downtime HA expansion support
+- Guarded SQLite-to-etcd HA migration and expansion support
 - Embedded etcd for multi-master clusters
 
 ## Architecture
@@ -47,7 +47,9 @@ This project deploys a production-ready K3s Kubernetes cluster on Raspberry Pi 4
 
 ```
 ansible/
-├── inventory.yml              # Cluster node inventory
+├── inventories/               # Cluster inventories
+│   ├── multinode.yml          # Production cluster
+│   └── single-pi.yml          # Single-node cluster
 ├── group_vars/
 │   └── all.yml               # K3s configuration variables
 ├── playbooks/                # All playbooks
@@ -61,6 +63,9 @@ ansible/
 ```
 
 ## Prerequisites
+
+Unless a command says otherwise, run Ansible commands from the `ansible/`
+directory and select the inventory explicitly.
 
 ### Raspberry Pi Requirements
 - Raspberry Pi 4B (4GB+ RAM recommended)
@@ -78,7 +83,7 @@ ansible/
 
 **Important:** Before installing K3s, configure static IPs to prevent IP changes on reboot.
 
-First, update `inventory.yml` with your current Pi IP addresses (from DHCP):
+First, update `inventories/multinode.yml` with your current Pi IP addresses (from DHCP):
 
 ```yaml
 master:
@@ -101,7 +106,7 @@ workers:
 Then run the static IP configuration playbook:
 
 ```bash
-ansible-playbook -i inventory.yml playbooks/configure-static-ips.yml
+ansible-playbook -i inventories/multinode.yml playbooks/configure-static-ips.yml
 ```
 
 This will:
@@ -137,7 +142,7 @@ docker run --rm \
     cp /tmp/key /root/.ssh/raspberrypi_rsa && \
     chmod 600 /root/.ssh/raspberrypi_rsa && \
     cd /workspace/ansible && \
-    ansible-playbook -i inventory.yml playbooks/k3s-install.yml \
+    ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml \
     --ssh-common-args="-o StrictHostKeyChecking=no"'
 ```
 
@@ -145,7 +150,7 @@ docker run --rm \
 
 ```bash
 cd ansible/
-ansible-playbook -i inventory.yml playbooks/k3s-install.yml
+ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml
 ```
 
 ### 4. Access Your Cluster
@@ -215,15 +220,16 @@ install_kubectl_completion: true
 
 ### add-masters.yml
 
-Adds additional master nodes to an existing K3s cluster for high availability without downtime.
+Adds fresh additional master nodes after the existing primary has been migrated
+to embedded etcd. The migration itself is a separate, guarded operation.
 
 **Usage:**
 ```bash
-ansible-playbook -i inventory.yml playbooks/add-masters.yml
+ansible-playbook -i inventories/multinode.yml playbooks/add-masters.yml
 ```
 
 **What it does:**
-1. Verifies primary master is healthy
+1. Verifies the primary master is already using embedded etcd
 2. Prepares new master nodes (prerequisites)
 3. Retrieves cluster token from primary master
 4. Installs K3s in server mode on new nodes
@@ -232,10 +238,19 @@ ansible-playbook -i inventory.yml playbooks/add-masters.yml
 
 **Prerequisites:**
 - Existing K3s cluster must be running
-- New master nodes added to `additional_masters` group in inventory.yml
+- Fresh master nodes added to the sibling `additional_masters` group in inventories/multinode.yml
 - Odd number of total masters recommended (3, 5, or 7)
 
-**See [../HA_SETUP.md](../HA_SETUP.md) for complete HA setup guide**
+**See [HA_SETUP.md](HA_SETUP.md) for the complete HA setup guide.**
+
+To migrate the existing single-server primary first:
+
+```bash
+ansible-playbook -i inventories/multinode.yml \
+  playbooks/migrate-single-server-to-ha.yml \
+  --limit pi-01 \
+  -e migration_confirmation=MIGRATE_K3S_SQLITE_TO_ETCD
+```
 
 ### configure-static-ips.yml
 
@@ -243,11 +258,11 @@ Configures static IP addresses on all Raspberry Pi nodes for production stabilit
 
 **Usage:**
 ```bash
-ansible-playbook -i inventory.yml playbooks/configure-static-ips.yml
+ansible-playbook -i inventories/multinode.yml playbooks/configure-static-ips.yml
 ```
 
 **What it does:**
-1. Reads current IP from inventory.yml for each node
+1. Reads current IP from inventories/multinode.yml for each node
 2. Configures static IP in /etc/dhcpcd.conf
 3. Backs up existing configuration
 4. Restarts network service
@@ -268,7 +283,7 @@ Main installation playbook that:
 
 **Usage:**
 ```bash
-ansible-playbook -i inventory.yml playbooks/k3s-install.yml
+ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml
 ```
 
 **Tags:**
@@ -280,13 +295,13 @@ ansible-playbook -i inventory.yml playbooks/k3s-install.yml
 **Examples:**
 ```bash
 # Only prepare systems (no K3s install)
-ansible-playbook -i inventory.yml playbooks/k3s-install.yml --tags prereqs
+ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml --tags prereqs
 
 # Only setup master node
-ansible-playbook -i inventory.yml playbooks/k3s-install.yml --tags master
+ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml --tags master
 
 # Skip verification
-ansible-playbook -i inventory.yml playbooks/k3s-install.yml --skip-tags verify
+ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml --skip-tags verify
 ```
 
 ### k3s-reset.yml
@@ -299,7 +314,7 @@ Complete cluster removal playbook that:
 
 **Usage:**
 ```bash
-ansible-playbook -i inventory.yml playbooks/k3s-reset.yml
+ansible-playbook -i inventories/multinode.yml playbooks/k3s-reset.yml
 ```
 
 **Note:** Preserves prerequisites (cgroups, iptables). Reboot recommended after reset.
@@ -349,12 +364,12 @@ sudo journalctl -u k3s-agent -f
 
 2. Rerun installation:
    ```bash
-   ansible-playbook -i inventory.yml playbooks/k3s-install.yml
+   ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml
    ```
 
 ### Add Worker Node
 
-1. Add to `inventory.yml`:
+1. Add to `inventories/multinode.yml`:
    ```yaml
    workers:
      hosts:
@@ -364,14 +379,14 @@ sudo journalctl -u k3s-agent -f
 
 2. Run playbook:
    ```bash
-   ansible-playbook -i inventory.yml playbooks/k3s-install.yml --limit pi-06
+   ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml --limit pi-06
    ```
 
 ### Add Master Nodes for High Availability
 
-To add additional master nodes for HA without downtime:
+To add additional master nodes after the primary migration:
 
-1. Add new masters to `inventory.yml`:
+1. Add fresh masters to the sibling `additional_masters` group in `inventories/multinode.yml`:
    ```yaml
    additional_masters:
      hosts:
@@ -383,15 +398,15 @@ To add additional master nodes for HA without downtime:
 
 2. Run the add-masters playbook:
    ```bash
-   ansible-playbook -i inventory.yml playbooks/add-masters.yml
+   ansible-playbook -i inventories/multinode.yml playbooks/add-masters.yml
    ```
 
-**For detailed HA setup instructions, see [../HA_SETUP.md](../HA_SETUP.md)**
+**For detailed HA setup instructions, see [HA_SETUP.md](HA_SETUP.md).**
 
 Important:
 - Use an odd number of total masters (3, 5, or 7) for proper etcd quorum
 - Set up a load balancer for production HA
-- This can be done without taking down your existing cluster
+- Existing workers require `promote-worker-to-master.yml`; do not list them as fresh masters
 
 ### Remove Worker Node
 
@@ -440,13 +455,13 @@ ls -la /opt/cni/bin/
 
 ```bash
 # Complete reset
-ansible-playbook -i inventory.yml playbooks/k3s-reset.yml
+ansible-playbook -i inventories/multinode.yml playbooks/k3s-reset.yml
 
 # Reboot all nodes
-ansible k3s_cluster -i inventory.yml -m reboot --become
+ansible k3s_cluster -i inventories/multinode.yml -m reboot --become
 
 # Reinstall
-ansible-playbook -i inventory.yml playbooks/k3s-install.yml
+ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml
 ```
 
 ## Performance Tips

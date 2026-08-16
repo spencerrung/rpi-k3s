@@ -86,7 +86,7 @@
   when:
     - enable_cgroups
     - is_netboot
-    - "'cgroup_memory=1' not in running_cmdline.stdout or 'cgroup_enable=memory' not in running_cmdline.stdout"
+    - "'cgroup_memory=1' not in running_cmdline.stdout or 'cgroup_enable=memory' not in running_cmdline.stdout or 'cgroup_disable=memory' in running_cmdline.stdout"
   tags: [prereqs, cgroups]
 
 - name: Configure cgroups for local boot (non-netboot)
@@ -161,11 +161,12 @@
 
       Please manually check /boot/firmware/cmdline.txt and ensure it contains:
       cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory
+      and does not contain cgroup_disable=memory.
 
       Then reboot the system manually.
   when:
     - enable_cgroups
-    - "'cgroup_memory=1' not in proc_cmdline.stdout or 'cgroup_enable=memory' not in proc_cmdline.stdout"
+    - "'cgroup_memory=1' not in proc_cmdline.stdout or 'cgroup_enable=memory' not in proc_cmdline.stdout or 'cgroup_disable=memory' in proc_cmdline.stdout"
   tags: [prereqs, cgroups, verify]
 
 - name: Load required kernel modules

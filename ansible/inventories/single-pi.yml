@@ -4,12 +4,18 @@
 
 all:
   children:
-    k3s_cluster:
+    single_pi:
       children:
-        master:
-          hosts:
-            pi5-single:
-              ansible_host: 10.10.10.58
-              ansible_user: pi
-              ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
-              is_primary_master: true
+        k3s_cluster:
+          children:
+            master:
+              hosts:
+                pi5-single:
+                  ansible_host: 10.10.10.58
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                  is_primary_master: true
+            workers:
+              hosts: {}
+            additional_masters:
+              hosts: {}
