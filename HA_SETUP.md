@@ -20,6 +20,9 @@ that step as zero-downtime maintenance.
 
 K3s supports converting an existing SQLite server by restarting it with
 `cluster-init`. This repository makes that an explicit, guarded operation.
+If using a load balancer or VIP, set `k3s_registration_address` and
+`k3s_tls_sans` before running this migration so the primary's certificate
+includes the stable address.
 
 Run from `ansible/`:
 
@@ -114,7 +117,8 @@ Control-plane redundancy is not the same as end-to-end worker availability.
 Existing workers and kubeconfigs still point at the original primary unless a
 stable registration address is configured.
 
-For a load balancer or VIP, set it before installing new nodes:
+For a load balancer or VIP, set it before running the migration and before
+installing new nodes:
 
 ```yaml
 k3s_registration_address: 10.10.10.50

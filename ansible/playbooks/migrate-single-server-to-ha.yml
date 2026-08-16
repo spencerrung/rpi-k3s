@@ -126,6 +126,12 @@
             marker: '# {mark} ANSIBLE SQLITE TO ETCD MIGRATION'
             block: |
               cluster-init: true
+              {% if k3s_tls_sans | length > 0 %}
+              tls-san:
+              {% for san in k3s_tls_sans %}
+                - "{{ san }}"
+              {% endfor %}
+              {% endif %}
 
         - name: Start K3s with embedded etcd enabled
           ansible.builtin.systemd:
