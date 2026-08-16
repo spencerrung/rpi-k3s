@@ -18,7 +18,6 @@
     confirm_node_removal: ""
     allow_local_storage_reset: false
     recovery_journal_lines: 100
-    k3s_node_name_override: ""
     recovery_node_name: "{{ k3s_node_name_override | default(inventory_hostname, true) }}"
     recovery_master: "{{ groups['master'][0] }}"
 
