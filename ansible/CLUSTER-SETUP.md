@@ -77,6 +77,81 @@ install_k9s: true
 
 ## Common Operations
 
+### Diagnose or Rejoin an Unhealthy Worker
+
+Use `diagnose-and-rejoin-node.yml` for one worker at a time. It is read-only
+unless a recovery mode and its matching confirmation string are supplied.
+
+The target must exist in the selected inventory. For a node that has already
+fallen out of the inventory, add it temporarily under `workers` with its
+current IP and, when its Linux hostname differs from the Kubernetes node name,
+set `k3s_node_name_override` for that host. Do not commit a temporary dead-node
+entry just to perform recovery.
+
+Ansible cannot diagnose a host that cannot complete SSH authentication. If the
+SSH connection itself times out, restore the node's power/network path or use
+local console access first, then run the diagnosis playbook.
+
+Run the read-only diagnosis first:
+
+```bash
+ansible-playbook -i inventories/multinode.yml \
+  playbooks/diagnose-and-rejoin-node.yml \
+  --limit pi-recovery \
+  -e recovery_mode=diagnose
+```
+
+If the agent is installed but only needs a service restart:
+
+```bash
+ansible-playbook -i inventories/multinode.yml \
+  playbooks/diagnose-and-rejoin-node.yml \
+  --limit pi-recovery \
+  -e recovery_mode=restart \
+  -e confirm_restart=RESTART_K3S_AGENT
+```
+
+For a full worker rejoin, the playbook stops and uninstalls the existing
+agent, then installs it again using a fresh token read from the primary
+master:
+
+```bash
+ansible-playbook -i inventories/multinode.yml \
+  playbooks/diagnose-and-rejoin-node.yml \
+  --limit pi-recovery \
+  -e recovery_mode=rejoin \
+  -e confirm_rejoin=REJOIN_K3S_WORKER
+```
+
+The rejoin refuses to remove a node-local storage tree by default. If the
+node has local-path PVC data, back it up or migrate it first. Only then may
+the destructive cleanup be acknowledged explicitly:
+
+```bash
+ansible-playbook -i inventories/multinode.yml \
+  playbooks/diagnose-and-rejoin-node.yml \
+  --limit pi-recovery \
+  -e recovery_mode=rejoin \
+  -e confirm_rejoin=REJOIN_K3S_WORKER \
+  -e allow_local_storage_reset=true
+```
+
+Deleting the stale Kubernetes node object is separate and requires a second
+confirmation:
+
+```bash
+ansible-playbook -i inventories/multinode.yml \
+  playbooks/diagnose-and-rejoin-node.yml \
+  --limit pi-recovery \
+  -e recovery_mode=rejoin \
+  -e confirm_rejoin=REJOIN_K3S_WORKER \
+  -e remove_stale_node=true \
+  -e confirm_node_removal=DELETE_K3S_NODE
+```
+
+Do not use the rejoin mode on a control-plane node. It intentionally refuses
+master targets; control-plane recovery needs a quorum-aware procedure.
+
 ### Configure Static IPs
 ```bash
 # Single-pi cluster

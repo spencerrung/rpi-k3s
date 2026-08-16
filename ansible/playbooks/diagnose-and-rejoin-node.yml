@@ -1,0 +1,399 @@
+---
+# Diagnose a K3s worker and optionally restart or rejoin it.
+#
+# Safe by default: recovery_mode=diagnose only reads state. Restarting the
+# agent and removing K3s data both require explicit confirmation variables.
+
+- name: Diagnose or recover one K3s worker
+  hosts: all
+  become: yes
+  gather_facts: yes
+  serial: 1
+
+  vars:
+    recovery_mode: diagnose
+    confirm_restart: ""
+    confirm_rejoin: ""
+    remove_stale_node: false
+    confirm_node_removal: ""
+    allow_local_storage_reset: false
+    recovery_journal_lines: 100
+    recovery_node_name: "{{ k3s_node_name_override | default(inventory_hostname, true) }}"
+    recovery_master: "{{ groups['master'][0] }}"
+
+  pre_tasks:
+    - name: Validate recovery mode
+      ansible.builtin.assert:
+        that:
+          - recovery_mode in ['diagnose', 'restart', 'rejoin']
+          - ansible_limit | default('') not in ['', 'all', '*']
+          - ansible_play_hosts | length == 1
+          - recovery_mode != 'restart' or confirm_restart == 'RESTART_K3S_AGENT'
+          - recovery_mode != 'rejoin' or confirm_rejoin == 'REJOIN_K3S_WORKER'
+          - not remove_stale_node or confirm_node_removal == 'DELETE_K3S_NODE'
+        fail_msg: |
+          Refusing an unsafe recovery invocation.
+
+          Always target exactly one host with --limit.
+          diagnose is read-only.
+          restart requires -e confirm_restart=RESTART_K3S_AGENT.
+          rejoin requires -e confirm_rejoin=REJOIN_K3S_WORKER.
+          deleting the stale Kubernetes node requires
+          -e remove_stale_node=true -e confirm_node_removal=DELETE_K3S_NODE.
+
+    - name: Refuse destructive recovery on a control-plane host
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname not in (groups['master'] | default([]))
+        fail_msg: >-
+          This playbook only rejoins worker nodes. Use the control-plane
+          recovery procedure instead of resetting a master with this playbook.
+      when: recovery_mode in ['restart', 'rejoin']
+
+    - name: Show recovery plan
+      ansible.builtin.debug:
+        msg:
+          - "Target: {{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})"
+          - "Kubernetes node name: {{ recovery_node_name }}"
+          - "Mode: {{ recovery_mode }}"
+          - "Primary master: {{ recovery_master }} ({{ k3s_master_ip }})"
+          - "Stale node removal: {{ remove_stale_node }}"
+
+  tasks:
+    - name: Check Kubernetes node record from the primary master
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ recovery_node_name }}"
+          - -o
+          - wide
+      delegate_to: "{{ recovery_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: cluster_node_status
+      changed_when: false
+      failed_when: false
+      tags: [diagnose, cluster]
+
+    - name: Check Kubernetes node readiness from the primary master
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ recovery_node_name }}"
+          - -o
+          - "jsonpath={.status.conditions[?(@.type=='Ready')].status}"
+      delegate_to: "{{ recovery_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: cluster_node_ready
+      changed_when: false
+      failed_when: false
+      tags: [diagnose, cluster]
+
+    - name: Read the worker join token when rejoining
+      ansible.builtin.slurp:
+        src: "{{ k3s_token_file }}"
+      delegate_to: "{{ recovery_master }}"
+      register: recovery_token_raw
+      no_log: true
+      when: recovery_mode == 'rejoin'
+      tags: [rejoin, token]
+
+    - name: Set the worker join token
+      ansible.builtin.set_fact:
+        recovery_token: "{{ recovery_token_raw.content | b64decode | trim }}"
+      no_log: true
+      when: recovery_mode == 'rejoin'
+      tags: [rejoin, token]
+
+    - name: Check K3s agent service
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - k3s-agent
+          - --no-pager
+          - --property=ActiveState,SubState,UnitFileState,ExecMainStatus
+      register: agent_service_status
+      changed_when: false
+      failed_when: false
+      tags: [diagnose, restart, rejoin]
+
+    - name: Check K3s files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /usr/local/bin/k3s
+        - /usr/local/bin/k3s-agent-uninstall.sh
+        - "{{ k3s_data_dir }}"
+        - "{{ k3s_data_dir }}/storage"
+      register: k3s_paths
+      tags: [diagnose, rejoin]
+
+    - name: Check local K3s storage contents before a rejoin
+      ansible.builtin.find:
+        paths: "{{ k3s_data_dir }}/storage"
+        recurse: false
+        file_type: any
+        hidden: true
+      register: local_storage_contents
+      failed_when: false
+      when: recovery_mode == 'rejoin'
+      tags: [rejoin, storage]
+
+    - name: Refuse to delete a node-local storage tree implicitly
+      ansible.builtin.fail:
+        msg: |
+          {{ k3s_data_dir }}/storage contains {{ local_storage_contents.matched }} item(s).
+          The K3s agent uninstall script can remove this tree and local-path PVC data
+          may be unrecoverable. Back up or migrate the data first, then rerun with:
+
+            -e allow_local_storage_reset=true
+
+          This flag does not replace a backup; it only acknowledges the risk.
+      when:
+        - recovery_mode == 'rejoin'
+        - local_storage_contents.matched | default(0) | int > 0
+        - not allow_local_storage_reset
+      tags: [rejoin, storage]
+
+    - name: Display local storage reset warning
+      ansible.builtin.debug:
+        msg: |
+          WARNING: rejoin is authorized to remove {{ k3s_data_dir }}/storage.
+          {{ local_storage_contents.matched | default(0) }} item(s) were found.
+          Confirm that local-path data has been backed up or is disposable.
+      when:
+        - recovery_mode == 'rejoin'
+        - local_storage_contents.matched | default(0) | int > 0
+        - allow_local_storage_reset
+      tags: [rejoin, storage]
+
+    - name: Check kernel command line
+      ansible.builtin.command: cat /proc/cmdline
+      register: recovery_cmdline
+      changed_when: false
+      tags: [diagnose, rejoin]
+
+    - name: Flag conflicting memory cgroup settings
+      ansible.builtin.set_fact:
+        cgroup_configuration_warning: >-
+          {{ 'cgroup_disable=memory is present alongside memory cgroup enable flags'
+             if 'cgroup_disable=memory' in recovery_cmdline.stdout
+             else 'none detected' }}
+      tags: [diagnose, rejoin]
+
+    - name: Check filesystem and memory pressure
+      ansible.builtin.shell: |
+        set -o pipefail
+        printf '%s\n' '--- filesystem ---'
+        df -hT / "{{ k3s_data_dir }}"
+        printf '%s\n' '--- memory ---'
+        free -h
+      args:
+        executable: /bin/bash
+      register: recovery_resources
+      changed_when: false
+      tags: [diagnose, rejoin]
+
+    - name: Check connectivity to the K3s API
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --silent
+          - --show-error
+          - --insecure
+          - --max-time
+          - "5"
+          - "https://{{ k3s_registration_address }}:{{ k3s_api_port }}/ping"
+      register: recovery_api_check
+      changed_when: false
+      failed_when: false
+      tags: [diagnose, rejoin]
+
+    - name: Collect recent K3s agent logs
+      ansible.builtin.command:
+        argv:
+          - journalctl
+          - -u
+          - k3s-agent
+          - -n
+          - "{{ recovery_journal_lines }}"
+          - --no-pager
+      register: recovery_logs
+      changed_when: false
+      failed_when: false
+      tags: [diagnose, restart, rejoin]
+
+    - name: Display diagnosis
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          K3S NODE RECOVERY DIAGNOSIS
+          ========================================
+          Host: {{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})
+          Kubernetes node: {{ recovery_node_name }}
+          Primary master: {{ recovery_master }} ({{ k3s_master_ip }})
+
+          Cluster node query (rc={{ cluster_node_status.rc }}):
+          {{ cluster_node_status.stdout | default('') }}
+          Ready condition: {{ cluster_node_ready.stdout | default('unknown') }}
+
+          Agent service:
+          {{ agent_service_status.stdout | default('') }}
+
+          K3s paths:
+          {{ k3s_paths.results | map(attribute='stat') | map(attribute='path') | list }}
+          Kernel command line:
+          {{ recovery_cmdline.stdout }}
+          Cgroup configuration warning: {{ cgroup_configuration_warning }}
+
+          API connectivity (rc={{ recovery_api_check.rc }}):
+          {{ recovery_api_check.stdout | default('') }}
+          {{ recovery_api_check.stderr | default('') }}
+
+          Resource snapshot:
+          {{ recovery_resources.stdout }}
+
+          Recent agent logs:
+          {{ recovery_logs.stdout | default('') }}
+      tags: [diagnose]
+
+    - name: Restart the K3s agent
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: restarted
+      when: recovery_mode == 'restart'
+      tags: [restart]
+
+    - name: Wait for the restarted agent to become active
+      ansible.builtin.command: systemctl is-active k3s-agent
+      register: restarted_agent_status
+      until: restarted_agent_status.stdout == 'active'
+      retries: 12
+      delay: 5
+      changed_when: false
+      when: recovery_mode == 'restart'
+      tags: [restart]
+
+    - name: Remove the stale Kubernetes node record
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - delete
+          - node
+          - "{{ recovery_node_name }}"
+          - --ignore-not-found=true
+      delegate_to: "{{ recovery_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      when:
+        - recovery_mode == 'rejoin'
+        - remove_stale_node
+      tags: [rejoin, cluster]
+
+    - name: Stop the K3s agent before rejoining
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: stopped
+      when:
+        - recovery_mode == 'rejoin'
+        - k3s_paths.results[1].stat.exists
+      tags: [rejoin]
+
+    - name: Check for an incomplete K3s installation
+      ansible.builtin.fail:
+        msg: >-
+          K3s is installed but /usr/local/bin/k3s-agent-uninstall.sh is missing.
+          Refusing to guess at cleanup. Repair the installation manually or restore
+          the official uninstall script before rerunning this playbook.
+      when:
+        - recovery_mode == 'rejoin'
+        - k3s_paths.results[0].stat.exists
+        - not k3s_paths.results[1].stat.exists
+      tags: [rejoin]
+
+    - name: Uninstall the existing K3s agent
+      ansible.builtin.command: /usr/local/bin/k3s-agent-uninstall.sh
+      when:
+        - recovery_mode == 'rejoin'
+        - k3s_paths.results[1].stat.exists
+      tags: [rejoin]
+
+    - name: Install the K3s agent with the current cluster token
+      ansible.builtin.shell: >-
+        curl -sfL {{ k3s_install_url }} |
+        INSTALL_K3S_VERSION={{ k3s_version }}
+        K3S_URL=https://{{ k3s_registration_address }}:{{ k3s_api_port }}
+        K3S_TOKEN={{ recovery_token }}
+        INSTALL_K3S_EXEC="agent {{ (k3s_worker_args + ['--node-name=' ~ recovery_node_name]) | join(' ') }}"
+        sh -
+      no_log: true
+      when: recovery_mode == 'rejoin'
+      tags: [rejoin]
+
+    - name: Enable and start the rejoined K3s agent
+      ansible.builtin.systemd:
+        name: k3s-agent
+        enabled: yes
+        state: started
+      when: recovery_mode == 'rejoin'
+      tags: [rejoin]
+
+    - name: Wait for the rejoined agent to become active
+      ansible.builtin.command: systemctl is-active k3s-agent
+      register: rejoined_agent_status
+      until: rejoined_agent_status.stdout == 'active'
+      retries: 12
+      delay: 5
+      changed_when: false
+      when: recovery_mode == 'rejoin'
+      tags: [rejoin]
+
+    - name: Show post-recovery Kubernetes node status
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - nodes
+          - -o
+          - wide
+      delegate_to: "{{ recovery_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: post_recovery_nodes
+      changed_when: false
+      when: recovery_mode in ['restart', 'rejoin']
+      tags: [restart, rejoin, cluster]
+
+    - name: Wait for the Kubernetes node to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ recovery_node_name }}"
+          - -o
+          - "jsonpath={.status.conditions[?(@.type=='Ready')].status}"
+      delegate_to: "{{ recovery_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: post_recovery_ready
+      until:
+        - post_recovery_ready.rc == 0
+        - post_recovery_ready.stdout == 'True'
+      retries: 30
+      delay: 10
+      changed_when: false
+      when: recovery_mode in ['restart', 'rejoin']
+      tags: [restart, rejoin, cluster]
+
+    - name: Display post-recovery status
+      ansible.builtin.debug:
+        msg: "{{ post_recovery_nodes.stdout_lines }}"
+      when: recovery_mode in ['restart', 'rejoin']
+      tags: [restart, rejoin, cluster]
