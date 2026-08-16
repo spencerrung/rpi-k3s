@@ -77,10 +77,43 @@
       tags: [reset, master]
 
 # ============================================================================
+# Reset Additional Master Nodes
+# ============================================================================
+- name: Reset K3s additional master nodes
+  hosts: additional_masters
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Check if additional master uninstall script exists
+      ansible.builtin.stat:
+        path: /usr/local/bin/k3s-uninstall.sh
+      register: additional_master_uninstall
+      tags: [reset, additional_master]
+
+    - name: Stop and uninstall K3s additional master
+      ansible.builtin.command: /usr/local/bin/k3s-uninstall.sh
+      when: additional_master_uninstall.stat.exists
+      tags: [reset, additional_master]
+
+    - name: Remove additional master files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/k3s
+        - /usr/local/bin/kubectl
+        - /usr/local/bin/crictl
+        - /etc/rancher
+        - /var/lib/rancher
+        - /home/pi/.kube
+      tags: [reset, additional_master]
+
+# ============================================================================
 # Cleanup All Nodes
 # ============================================================================
 - name: Cleanup all nodes
-  hosts: k3s_cluster
+  hosts: "k3s_cluster,additional_masters"
   become: yes
   gather_facts: no
 
@@ -125,8 +158,8 @@
           🧹 All K3s components have been removed from all nodes.
 
           📋 Next Steps:
-          1. Optionally reboot nodes: ansible k3s_cluster -i inventory.yml -m reboot --become
-          2. Reinstall cluster: ansible-playbook -i inventory.yml playbooks/k3s-install.yml
+          1. Optionally reboot nodes: ansible k3s_cluster -i inventories/multinode.yml -m reboot --become
+          2. Reinstall cluster: ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml
 
           ⚠️  Note: Prerequisites (cgroups, iptables) are preserved.
           If you want to remove those too, you'll need to manually edit:

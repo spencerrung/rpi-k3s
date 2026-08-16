@@ -1,0 +1,263 @@
+---
+# Add Additional Master Nodes to K3s Cluster
+# This playbook adds new master nodes to an existing K3s cluster for HA
+#
+# Prerequisites:
+# 1. Existing K3s cluster must be running
+# 2. New nodes must be added to 'additional_masters' in inventories/multinode.yml
+# 3. New nodes should have static IPs configured
+#
+# Usage:
+#   ansible-playbook -i ../inventories/multinode.yml add-masters.yml
+#
+# IMPORTANT: For proper HA, you should have an odd number of master nodes (3, 5, or 7)
+
+- name: Validate additional master inventory
+  hosts: localhost
+  connection: local
+  gather_facts: no
+
+  tasks:
+    - name: Validate the additional master count
+      ansible.builtin.assert:
+        that:
+          - groups['additional_masters'] | default([]) | length > 0
+          - groups['master'] | length >= 1
+          - (groups['master'] | length + groups['additional_masters'] | length) >= 3
+          - (groups['master'] | length + groups['additional_masters'] | length) is odd
+        fail_msg: |
+          Refusing to change the cluster.
+
+          Define one primary master and enough fresh additional masters to create
+          an odd embedded-etcd cluster of at least three servers.
+
+    - name: Refuse additional masters nested in the existing cluster group
+      ansible.builtin.assert:
+        that:
+          - item not in groups['k3s_cluster']
+        fail_msg: >-
+          {{ item }} is in both additional_masters and k3s_cluster. Keep new
+          masters in the sibling additional_masters group until they join.
+      loop: "{{ groups['additional_masters'] }}"
+
+    - name: Display master expansion plan
+      ansible.builtin.debug:
+        msg:
+          - "Primary master: {{ groups['master'][0] }}"
+          - "Additional masters: {{ groups['additional_masters'] }}"
+          - "Final server count: {{ groups['master'] | length + groups['additional_masters'] | length }}"
+
+# ============================================================================
+# Prerequisites - Prepare new master nodes
+# ============================================================================
+- name: Prepare additional master nodes
+  hosts: additional_masters
+  become: yes
+  gather_facts: yes
+  serial: 1
+  any_errors_fatal: true
+
+  pre_tasks:
+    - name: Check if additional_masters group has hosts
+      fail:
+        msg: |
+          No hosts found in 'additional_masters' group!
+
+          Please add new master nodes to the 'additional_masters' group in inventories/multinode.yml
+          Example:
+            additional_masters:
+              hosts:
+                pi-06:
+                  ansible_host: 10.10.10.XXX
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+      when: groups['additional_masters'] | length == 0
+      run_once: true
+
+    - name: Display master nodes to be added
+      debug:
+        msg: |
+          Adding {{ groups['additional_masters'] | length }} additional master node(s):
+          {% for host in groups['additional_masters'] %}
+          - {{ host }} ({{ hostvars[host]['ansible_host'] }})
+          {% endfor %}
+
+          Primary master: {{ groups['master'][0] }} ({{ k3s_master_ip }})
+      run_once: true
+
+  tasks:
+    - name: Include prerequisites tasks
+      include_tasks: ../tasks/prerequisites.yml
+
+# ============================================================================
+# Verify Primary Master and Get Token
+# ============================================================================
+- name: Verify primary master and retrieve cluster token
+  hosts: master
+  become: yes
+  gather_facts: no
+  any_errors_fatal: true
+
+  tasks:
+    - name: Check if K3s is running on primary master
+      systemd:
+        name: k3s
+      register: primary_master_status
+
+    - name: Fail if primary master is not running
+      fail:
+        msg: |
+          K3s is not running on primary master {{ inventory_hostname }}!
+          Status: {{ primary_master_status.status.ActiveState }}
+
+          Please ensure the primary master is healthy before adding additional masters.
+      when: primary_master_status.status.ActiveState != "active"
+
+    - name: Get current cluster nodes
+      ansible.builtin.command: kubectl get nodes --no-headers
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: current_nodes
+      changed_when: false
+
+    - name: Check for the embedded-etcd member database
+      ansible.builtin.stat:
+        path: "{{ k3s_data_dir }}/server/db/etcd/member"
+      register: embedded_etcd_member
+
+    - name: Refuse to join servers to a non-HA datastore
+      ansible.builtin.assert:
+        that:
+          - embedded_etcd_member.stat.exists
+        fail_msg: >-
+          The primary master is not using embedded etcd. Run
+          migrate-single-server-to-ha.yml first, then rerun this playbook.
+
+    - name: Display current cluster state
+      debug:
+        msg: |
+          Current cluster nodes:
+          {{ current_nodes.stdout }}
+
+    - name: Read K3s server token
+      ansible.builtin.slurp:
+        src: "{{ k3s_token_file }}"
+      register: k3s_token_raw
+      no_log: true
+
+    - name: Set K3s token fact for all hosts
+      ansible.builtin.set_fact:
+        k3s_token: "{{ k3s_token_raw.content | b64decode | trim }}"
+      delegate_to: "{{ item }}"
+      delegate_facts: yes
+      loop: "{{ groups['additional_masters'] }}"
+      no_log: true
+
+# ============================================================================
+# Setup Additional Master Nodes
+# ============================================================================
+- name: Setup additional K3s master nodes
+  hosts: additional_masters
+  become: yes
+  gather_facts: yes
+  serial: 1
+  any_errors_fatal: true
+
+  tasks:
+    - name: Include additional master setup tasks
+      include_tasks: ../tasks/additional-master-setup.yml
+
+# ============================================================================
+# Verify Cluster HA Setup
+# ============================================================================
+- name: Verify HA cluster configuration
+  hosts: master
+  become: yes
+  gather_facts: no
+  any_errors_fatal: true
+
+  tasks:
+    - name: Wait for all master nodes to join
+      ansible.builtin.shell: >-
+        kubectl get nodes -l node-role.kubernetes.io/control-plane
+        --no-headers | wc -l
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: master_count
+      until: master_count.stdout | int == (groups['master'] | length + groups['additional_masters'] | length)
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Get all nodes status
+      command: kubectl get nodes -o wide
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: all_nodes_status
+      changed_when: false
+
+    - name: Get embedded-etcd snapshot status
+      ansible.builtin.command: k3s etcd-snapshot ls
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: etcd_snapshots
+      changed_when: false
+      failed_when: false
+
+    - name: Show cluster configuration
+      debug:
+        msg: |
+
+          ✅ K3s HA Cluster Configuration Complete!
+
+          📊 Cluster Information:
+          - Master Nodes: {{ groups['master'] | length + groups['additional_masters'] | length }}
+          - Worker Nodes: {{ groups['workers'] | length }}
+          - Total Nodes: {{ groups['k3s_cluster'] | length + groups['additional_masters'] | length }}
+          - K3s Version: {{ k3s_version }}
+
+          🎯 Master Nodes:
+          {% for host in groups['master'] %}
+          - {{ host }} ({{ hostvars[host]['ansible_host'] }}) - Primary
+          {% endfor %}
+          {% for host in groups['additional_masters'] %}
+          - {{ host }} ({{ hostvars[host]['ansible_host'] }}) - Additional
+          {% endfor %}
+
+          📋 All Nodes:
+          {{ all_nodes_status.stdout }}
+
+          🔧 Next Steps:
+          1. Update your load balancer to include all master nodes
+          2. Configure your kubeconfig to use a load balancer endpoint
+          3. Test failover by stopping one master node
+          4. Monitor etcd health: kubectl get endpoints -n kube-system k3s
+
+          ⚠️  Important Notes:
+          - Always maintain an odd number of master nodes (3, 5, or 7)
+          - For production, use a load balancer in front of master nodes
+          - Workers and kubectl should connect via load balancer, not directly to one master
+          - Monitor etcd cluster health regularly
+
+          💡 Example Load Balancer Config (HAProxy):
+          frontend k3s-api
+            bind *:6443
+            mode tcp
+            option tcplog
+            default_backend k3s-masters
+
+          backend k3s-masters
+            mode tcp
+            balance roundrobin
+          {% for host in groups['master'] %}
+            server {{ host }} {{ hostvars[host]['ansible_host'] }}:6443 check
+          {% endfor %}
+          {% for host in groups['additional_masters'] %}
+            server {{ host }} {{ hostvars[host]['ansible_host'] }}:6443 check
+          {% endfor %}
+
+    - name: Show embedded-etcd snapshot status
+      debug:
+        msg: |
+          🗄️  Embedded-etcd snapshots:
+          {{ etcd_snapshots.stdout if etcd_snapshots.rc == 0 else "Unable to retrieve snapshot status" }}

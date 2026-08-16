@@ -118,6 +118,7 @@
   slurp:
     src: "{{ k3s_token_file }}"
   register: k3s_token_raw
+  no_log: true
   tags: [master, token]
 
 - name: Set K3s token fact for all hosts
@@ -126,6 +127,7 @@
   delegate_to: "{{ item }}"
   delegate_facts: yes
   loop: "{{ groups['k3s_cluster'] }}"
+  no_log: true
   tags: [master, token]
 
 - name: Check K3s service status

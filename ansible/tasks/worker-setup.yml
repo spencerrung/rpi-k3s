@@ -33,6 +33,7 @@
 - name: Install K3s agent on worker node
   shell: "{{ k3s_worker_install_cmd }}"
   register: k3s_agent_install
+  no_log: true
   when: not k3s_agent_installed.stat.exists or k3s_version not in k3s_agent_current_version.stdout or force_worker_install | default(false)
   tags: [worker, install]
 

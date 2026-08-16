@@ -1,0 +1,195 @@
+---
+- name: Promote one existing K3s worker to an embedded-etcd server
+  hosts: workers
+  become: yes
+  gather_facts: yes
+  serial: 1
+  any_errors_fatal: true
+
+  vars:
+    promotion_confirmation: ""
+    promotion_confirmation_value: PROMOTE_K3S_WORKER_TO_MASTER
+    acknowledge_local_storage_risk: false
+    promotion_node_name: "{{ k3s_node_name_override | default(ansible_hostname, true) }}"
+    promotion_master: "{{ groups['master'][0] }}"
+
+  pre_tasks:
+    - name: Validate worker promotion safety gates
+      ansible.builtin.assert:
+        that:
+          - ansible_limit | default('') not in ['', 'all', '*']
+          - ansible_play_hosts | length == 1
+          - cluster_type == 'multinode'
+          - promotion_confirmation == promotion_confirmation_value
+        fail_msg: |
+          Refusing to promote a worker into the control plane.
+
+          Target exactly one worker with --limit and rerun with:
+
+            -e promotion_confirmation=PROMOTE_K3S_WORKER_TO_MASTER
+
+    - name: Check the primary master datastore
+      ansible.builtin.stat:
+        path: "{{ k3s_data_dir }}/server/db/etcd/member"
+      delegate_to: "{{ promotion_master }}"
+      register: promotion_etcd_member
+
+    - name: Refuse promotion before datastore migration
+      ansible.builtin.assert:
+        that:
+          - promotion_etcd_member.stat.exists
+        fail_msg: >-
+          The primary master is not using embedded etcd. Run
+          migrate-single-server-to-ha.yml first.
+
+    - name: Check the worker services
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/systemd/system/k3s-agent.service
+        - /etc/systemd/system/k3s.service
+        - /usr/local/bin/k3s-agent-uninstall.sh
+      register: promotion_services
+
+    - name: Check node-local storage before uninstalling the agent
+      ansible.builtin.find:
+        paths: "{{ k3s_data_dir }}/storage"
+        recurse: false
+        file_type: any
+        hidden: true
+      register: promotion_storage
+      failed_when: false
+
+    - name: Refuse to overwrite an unsafe worker target
+      ansible.builtin.assert:
+        that:
+          - promotion_services.results[0].stat.exists
+          - not promotion_services.results[1].stat.exists
+          - promotion_services.results[2].stat.exists
+          - promotion_storage.matched | default(0) | int == 0 or acknowledge_local_storage_risk
+        fail_msg: |
+          The target must be an existing worker with the official agent uninstall
+          script and no existing server service. Local-path storage was found;
+          back it up or migrate it, then explicitly acknowledge the risk with:
+
+            -e acknowledge_local_storage_risk=true
+
+    - name: Check the worker node in Kubernetes
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ promotion_node_name }}"
+          - -o
+          - wide
+      delegate_to: "{{ promotion_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: promotion_node_before
+      changed_when: false
+
+    - name: Read the server join token
+      ansible.builtin.slurp:
+        src: "{{ k3s_token_file }}"
+      delegate_to: "{{ promotion_master }}"
+      register: promotion_token_raw
+      no_log: true
+
+    - name: Set the server join token
+      ansible.builtin.set_fact:
+        promotion_token: "{{ promotion_token_raw.content | b64decode | trim }}"
+      no_log: true
+
+  tasks:
+    - name: Drain the worker before changing its role
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - drain
+          - "{{ promotion_node_name }}"
+          - --ignore-daemonsets
+          - --delete-emptydir-data
+          - --force
+          - --timeout=10m
+      delegate_to: "{{ promotion_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      changed_when: true
+
+    - name: Uninstall the K3s agent
+      ansible.builtin.command: /usr/local/bin/k3s-agent-uninstall.sh
+      no_log: true
+
+    - name: Install K3s server on the promoted worker
+      ansible.builtin.shell: >-
+        curl -sfL {{ k3s_install_url }} |
+        INSTALL_K3S_VERSION={{ k3s_version }}
+        K3S_TOKEN={{ promotion_token }}
+        INSTALL_K3S_EXEC="server {{ (k3s_additional_master_args + (k3s_tls_sans | map('regex_replace', '^', '--tls-san=') | list)) | join(' ') }}
+        --node-name={{ promotion_node_name }}"
+        sh -
+      no_log: true
+
+    - name: Enable and start the promoted server
+      ansible.builtin.systemd:
+        name: k3s
+        enabled: true
+        state: started
+
+    - name: Wait for the promoted server to become active
+      ansible.builtin.command: systemctl is-active k3s
+      register: promotion_service_after
+      until: promotion_service_after.stdout == 'active'
+      retries: 30
+      delay: 5
+      changed_when: false
+
+    - name: Wait for the promoted node to become Ready
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ promotion_node_name }}"
+          - -o
+          - "jsonpath={.status.conditions[?(@.type=='Ready')].status}"
+      delegate_to: "{{ promotion_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: promotion_ready
+      until:
+        - promotion_ready.rc == 0
+        - promotion_ready.stdout == 'True'
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Uncordon the promoted node
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - uncordon
+          - "{{ promotion_node_name }}"
+      delegate_to: "{{ promotion_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+
+    - name: Show promoted node status
+      ansible.builtin.command:
+        argv:
+          - kubectl
+          - get
+          - node
+          - "{{ promotion_node_name }}"
+          - -o
+          - wide
+      delegate_to: "{{ promotion_master }}"
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: promotion_node_after
+      changed_when: false
+
+    - name: Display promotion result
+      ansible.builtin.debug:
+        var: promotion_node_after.stdout_lines
