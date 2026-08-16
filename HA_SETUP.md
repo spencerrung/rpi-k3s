@@ -98,6 +98,9 @@ acknowledged:
 
 That flag is not a backup. Back up or migrate local-path data first.
 
+After a successful promotion, move the host from `workers` into the `master`
+group under `k3s_cluster` before running other cluster playbooks.
+
 ## 4. Add Fresh Servers
 
 After the primary has been migrated, add fresh targets with:
@@ -110,6 +113,11 @@ ansible-playbook -i inventories/multinode.yml \
 The playbook refuses a non-HA primary, requires an odd final server count,
 serializes joins, protects the server token from output, and verifies each
 joined node by its Kubernetes name.
+
+After a successful join, move each host from `additional_masters` into the
+`master` group under `k3s_cluster`. Keep the original primary first because
+the inventory uses that host as the registration source. Remove the joined
+host from `additional_masters` before adding another batch.
 
 ## Stable API and Worker Registration
 

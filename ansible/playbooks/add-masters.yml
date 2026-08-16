@@ -22,7 +22,7 @@
       ansible.builtin.assert:
         that:
           - groups['additional_masters'] | default([]) | length > 0
-          - groups['master'] | length == 1
+          - groups['master'] | length >= 1
           - (groups['master'] | length + groups['additional_masters'] | length) >= 3
           - (groups['master'] | length + groups['additional_masters'] | length) is odd
         fail_msg: |
