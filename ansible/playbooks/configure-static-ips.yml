@@ -107,10 +107,10 @@
           ⚠️  IMPORTANT:
           - Static IPs are now configured in /etc/dhcpcd.conf
           - IPs will persist across reboots
-          - If you need to change IPs, update inventory.yml and rerun this playbook
+          - If you need to change IPs, update the selected inventory and rerun this playbook
 
           📋 Next Steps:
-          1. Verify all nodes are accessible: ansible k3s_cluster -i inventory.yml -m ping
-          2. Proceed with K3s installation: ansible-playbook -i inventory.yml playbooks/k3s-install.yml
+          1. Verify all nodes are accessible: ansible k3s_cluster -i inventories/multinode.yml -m ping
+          2. Proceed with K3s installation: ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml
       run_once: true
       tags: [verify]

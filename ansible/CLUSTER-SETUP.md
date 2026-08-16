@@ -6,7 +6,7 @@ This directory supports multiple K3s cluster configurations. Choose the one that
 
 ### Single-Node RPi5 (Development/Testing)
 - **Inventory:** `inventories/single-pi.yml`
-- **Configuration:** `group_vars/single-pi/all.yml`
+- **Configuration:** `group_vars/single_pi/all.yml`
 - **Usage:** Single Raspberry Pi 5 for development and testing
 - **HA Enabled:** No
 
@@ -15,11 +15,11 @@ This directory supports multiple K3s cluster configurations. Choose the one that
 ansible-playbook -i inventories/single-pi.yml playbooks/k3s-install.yml
 ```
 
-### Multi-Node Production (4 Workers + 1 Master)
+### Multi-Node Production (8 Workers + 1 Master)
 - **Inventory:** `inventories/multinode.yml`
 - **Configuration:** `group_vars/multinode/all.yml`
-- **Usage:** Production workloads across 5 Raspberry Pis
-- **HA Enabled:** Yes (can expand to 3, 5, 7 masters)
+- **Usage:** Production workloads across 9 Raspberry Pis
+- **Current state:** One primary master and eight workers; HA migration has not been performed
 
 **Install:**
 ```bash
@@ -35,7 +35,7 @@ ansible/
 │   └── multinode.yml            # Multi-node production
 ├── group_vars/
 │   ├── all.yml                  # Shared defaults
-│   ├── single-pi/all.yml        # Single-pi cluster config
+│   ├── single_pi/all.yml        # Single-pi cluster config
 │   └── multinode/all.yml        # Multi-node cluster config
 ├── playbooks/                    # Ansible playbooks
 ├── tasks/                        # Reusable task files
@@ -170,6 +170,45 @@ ansible-playbook -i inventories/single-pi.yml playbooks/k3s-reset.yml
 ansible-playbook -i inventories/multinode.yml playbooks/k3s-reset.yml
 ```
 
+## Future HA Operations
+
+The following operations are preparation for a future migration window. Do not
+run them against the live cluster until the HA change is scheduled.
+
+### Migrate the Existing Primary to HA
+
+Run this once for the existing single-server cluster. It briefly interrupts
+the API and requires the exact confirmation string:
+
+```bash
+ansible-playbook -i inventories/multinode.yml \
+  playbooks/migrate-single-server-to-ha.yml \
+  --limit pi-01 \
+  -e migration_confirmation=MIGRATE_K3S_SQLITE_TO_ETCD
+```
+
+### Promote an Existing Worker
+
+Use this for a worker that is already running K3s. It drains the node and
+reinstalls it as a server; it is not the same operation as adding a fresh
+additional master:
+
+```bash
+ansible-playbook -i inventories/multinode.yml \
+  playbooks/promote-worker-to-master.yml \
+  --limit pi-06 \
+  -e promotion_confirmation=PROMOTE_K3S_WORKER_TO_MASTER
+```
+
+### Add Fresh Masters
+
+After migration, add fresh nodes under the sibling `additional_masters` group
+and run:
+
+```bash
+ansible-playbook -i inventories/multinode.yml playbooks/add-masters.yml
+```
+
 ### Check Cluster Status
 ```bash
 # After installation, kubeconfig is saved to ../kubeconfig
@@ -195,7 +234,8 @@ If you need a different cluster configuration (e.g., 3-master HA):
    # Edit for your HA configuration
    ```
 
-3. Update `additional_masters` in inventory (or master args if needed)
+3. Keep the cluster-specific group name aligned with the directory name and
+   update `additional_masters` in inventory if needed
 
 4. Run installation:
    ```bash
@@ -207,7 +247,7 @@ If you need a different cluster configuration (e.g., 3-master HA):
 ### "inventory hostname could not be matched"
 Make sure you're using the correct inventory file:
 ```bash
-# Wrong (uses default inventory.yml)
+# Wrong (no explicit inventory)
 ansible-playbook playbooks/k3s-install.yml
 
 # Correct
@@ -231,6 +271,6 @@ grep "k3s_version" group_vars/*/all.yml
 ## Notes
 
 - **Single-Pi:** No HA support, no cluster-init, simpler networking
-- **Multi-Node:** HA-ready with cluster-init, worker taints, production features
+- **Multi-Node:** Currently one primary plus eight workers; HA migration tooling is available but not active
 - Both clusters use the same playbooks, just different inventories and variables
 - When migrating between clusters, ensure SSH keys are available for all nodes

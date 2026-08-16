@@ -22,6 +22,35 @@
   register: k3s_server_service
   tags: [additional_master, install]
 
+- name: Check if this node is already an agent
+  stat:
+    path: /etc/systemd/system/k3s-agent.service
+  register: k3s_agent_service
+  tags: [additional_master, install]
+
+- name: Check for existing K3s agent state
+  stat:
+    path: "{{ k3s_data_dir }}/agent"
+  register: k3s_agent_data
+  tags: [additional_master, install]
+
+- name: Refuse to overwrite an existing K3s installation
+  ansible.builtin.assert:
+    that:
+      - not k3s_server_service.stat.exists
+      - not k3s_agent_service.stat.exists
+      - not k3s_agent_data.stat.exists
+    fail_msg: >-
+      {{ inventory_hostname }} is not a fresh master target. Existing K3s server
+      or agent state was found. Use the guarded worker-promotion workflow instead
+      of overwriting this node.
+  tags: [additional_master, install]
+
+- name: Set the expected Kubernetes node name
+  ansible.builtin.set_fact:
+    k3s_expected_node_name: "{{ k3s_node_name_override | default(ansible_hostname, true) }}"
+  tags: [additional_master, verify]
+
 - name: Verify primary master is accessible
   wait_for:
     host: "{{ k3s_master_ip }}"
@@ -32,7 +61,8 @@
 - name: Install K3s server on additional master node
   shell: "{{ k3s_additional_master_install_cmd }}"
   register: k3s_server_install
-  when: not k3s_server_service.stat.exists or k3s_version not in k3s_current_version.stdout
+  no_log: true
+  when: not k3s_server_service.stat.exists
   tags: [additional_master, install]
 
 - name: Wait for K3s to be ready
@@ -135,18 +165,33 @@
   tags: [additional_master, verify]
 
 - name: Wait for node to be ready
-  shell: kubectl get nodes {{ inventory_hostname }} --no-headers 2>/dev/null | grep -c " Ready" || echo "0"
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - node
+      - "{{ k3s_expected_node_name }}"
+      - --no-headers
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   register: node_ready
-  until: node_ready.stdout | int == 1
+  until:
+    - node_ready.rc == 0
+    - "' Ready' in node_ready.stdout"
   retries: 30
   delay: 10
   changed_when: false
   tags: [additional_master, verify]
 
 - name: Get node info
-  command: kubectl get nodes {{ inventory_hostname }} -o wide
+  ansible.builtin.command:
+    argv:
+      - kubectl
+      - get
+      - node
+      - "{{ k3s_expected_node_name }}"
+      - -o
+      - wide
   environment:
     KUBECONFIG: /etc/rancher/k3s/k3s.yaml
   register: node_info

@@ -1,0 +1,205 @@
+---
+- name: Convert one existing K3s server from SQLite to embedded etcd
+  hosts: master
+  become: yes
+  gather_facts: yes
+  serial: 1
+
+  vars:
+    migration_confirmation: ""
+    migration_confirmation_value: MIGRATE_K3S_SQLITE_TO_ETCD
+    migration_backup_local_path: "{{ playbook_dir }}/../backups"
+    migration_backup_name: "k3s-sqlite-{{ inventory_hostname }}-{{ ansible_date_time.iso8601_basic_short }}.tar.gz"
+    migration_backup_archive: "/tmp/{{ migration_backup_name }}"
+    migration_db_dir: "{{ k3s_data_dir }}/server/db"
+    migration_config_path: /etc/rancher/k3s/config.yaml
+
+  pre_tasks:
+    - name: Validate migration safety gates
+      ansible.builtin.assert:
+        that:
+          - ansible_limit | default('') not in ['', 'all', '*']
+          - ansible_play_hosts | length == 1
+          - is_primary_master | default(false) | bool
+          - cluster_type == 'multinode'
+          - migration_confirmation == migration_confirmation_value
+        fail_msg: |
+          Refusing to migrate the K3s datastore.
+
+          Target exactly one primary master with --limit.
+          This workflow is only for the multinode cluster's primary master.
+          Re-run with:
+
+            -e migration_confirmation=MIGRATE_K3S_SQLITE_TO_ETCD
+
+    - name: Check the K3s service
+      ansible.builtin.systemd:
+        name: k3s
+      register: migration_service
+      changed_when: false
+
+    - name: Read the K3s service definition
+      ansible.builtin.command: systemctl cat k3s
+      register: migration_service_definition
+      changed_when: false
+
+    - name: Check the K3s config file
+      ansible.builtin.shell: >-
+        grep -E '^[[:space:]]*cluster-init:' {{ migration_config_path }}
+      register: migration_config_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check the SQLite datastore
+      ansible.builtin.stat:
+        path: "{{ migration_db_dir }}/state.db"
+      register: migration_sqlite
+
+    - name: Check for an existing embedded-etcd member database
+      ansible.builtin.stat:
+        path: "{{ migration_db_dir }}/etcd/member"
+      register: migration_etcd_member
+
+    - name: Validate the current datastore state
+      ansible.builtin.assert:
+        that:
+          - migration_service.status.ActiveState == 'active'
+          - "'--cluster-init' not in migration_service_definition.stdout"
+          - migration_config_check.rc != 0
+          - migration_sqlite.stat.exists
+          - not migration_etcd_member.stat.exists
+        fail_msg: |
+          Refusing to guess at the current datastore state.
+
+          The primary must be an active, non-HA K3s server using SQLite.
+          If embedded etcd is already present, treat this cluster as migrated
+          and use the additional-master workflow instead.
+
+    - name: Check current Kubernetes API health
+      ansible.builtin.command: kubectl get --raw=/readyz
+      environment:
+        KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+      register: migration_api_before
+      changed_when: false
+
+    - name: Create the local backup directory
+      ansible.builtin.file:
+        path: "{{ migration_backup_local_path }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      become: false
+
+  tasks:
+    - name: Back up SQLite state and enable embedded etcd
+      block:
+        - name: Stop K3s before backing up the SQLite state
+          ansible.builtin.systemd:
+            name: k3s
+            state: stopped
+
+        - name: Archive the SQLite state files
+          ansible.builtin.shell: |
+            set -euo pipefail
+            files=(state.db)
+            for sidecar in state.db-wal state.db-shm; do
+              if [ -e "{{ migration_db_dir }}/$sidecar" ]; then
+                files+=("$sidecar")
+              fi
+            done
+            tar -czf "{{ migration_backup_archive }}" -C "{{ migration_db_dir }}" "${files[@]}"
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Fetch the SQLite backup to the control machine
+          ansible.builtin.fetch:
+            src: "{{ migration_backup_archive }}"
+            dest: "{{ migration_backup_local_path }}/"
+            flat: true
+
+        - name: Enable embedded etcd in the K3s config
+          ansible.builtin.blockinfile:
+            path: "{{ migration_config_path }}"
+            create: true
+            mode: '0600'
+            marker: '# {mark} ANSIBLE SQLITE TO ETCD MIGRATION'
+            block: |
+              cluster-init: true
+              {% if k3s_tls_sans | length > 0 %}
+              tls-san:
+              {% for san in k3s_tls_sans %}
+                - "{{ san }}"
+              {% endfor %}
+              {% endif %}
+
+        - name: Start K3s with embedded etcd enabled
+          ansible.builtin.systemd:
+            name: k3s
+            state: started
+
+        - name: Wait for K3s to become active after migration
+          ansible.builtin.command: systemctl is-active k3s
+          register: migration_service_after
+          until: migration_service_after.stdout == 'active'
+          retries: 30
+          delay: 5
+          changed_when: false
+
+        - name: Wait for the Kubernetes API after migration
+          ansible.builtin.command: kubectl get --raw=/readyz
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: migration_api_after
+          until: migration_api_after.rc == 0
+          retries: 30
+          delay: 5
+          changed_when: false
+
+        - name: Check for the embedded-etcd member database
+          ansible.builtin.stat:
+            path: "{{ migration_db_dir }}/etcd/member"
+          register: migration_etcd_after
+
+        - name: Verify the embedded-etcd migration completed
+          ansible.builtin.assert:
+            that:
+              - migration_etcd_after.stat.exists
+            fail_msg: >-
+              K3s restarted, but the embedded-etcd member database was not found.
+              Do not add additional masters until the datastore state is investigated.
+
+        - name: Verify cluster nodes after migration
+          ansible.builtin.command: kubectl get nodes -o wide
+          environment:
+            KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+          register: migration_nodes_after
+          changed_when: false
+
+      rescue:
+        - name: Remove the migration config block after a failed migration
+          ansible.builtin.blockinfile:
+            path: "{{ migration_config_path }}"
+            marker: '# {mark} ANSIBLE SQLITE TO ETCD MIGRATION'
+            state: absent
+
+        - name: Restart K3s after restoring the previous config
+          ansible.builtin.systemd:
+            name: k3s
+            state: started
+
+        - name: Fail with the backup location
+          ansible.builtin.fail:
+            msg: >-
+              SQLite to embedded-etcd migration failed. The migration config block
+              was removed and K3s was restarted. A backup was fetched to
+              {{ migration_backup_local_path }}/{{ migration_backup_name }}.
+              Investigate before retrying.
+
+    - name: Display migration result
+      ansible.builtin.debug:
+        msg:
+          - "SQLite backup: {{ migration_backup_local_path }}/{{ migration_backup_name }}"
+          - "Kubernetes API: ready"
+          - "Embedded etcd member database: present"
+          - "Nodes: {{ migration_nodes_after.stdout_lines }}"
