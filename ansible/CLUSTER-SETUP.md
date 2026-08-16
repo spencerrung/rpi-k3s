@@ -88,6 +88,10 @@ current IP and, when its Linux hostname differs from the Kubernetes node name,
 set `k3s_node_name_override` for that host. Do not commit a temporary dead-node
 entry just to perform recovery.
 
+Ansible cannot diagnose a host that cannot complete SSH authentication. If the
+SSH connection itself times out, restore the node's power/network path or use
+local console access first, then run the diagnosis playbook.
+
 Run the read-only diagnosis first:
 
 ```bash
