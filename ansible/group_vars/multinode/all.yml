@@ -1,6 +1,6 @@
 ---
 # Multi-Node RPi K3s Cluster Configuration
-# 1 Master + 4+ Workers for production workloads
+# Current production cluster: 1 primary master + 8 workers
 
 # ============================================================================
 # Ansible Configuration
@@ -39,10 +39,10 @@ k3s_flannel_backend: vxlan
 k3s_data_dir: "/var/lib/rancher/k3s"
 
 # ============================================================================
-# K3s Master Configuration (HA Ready)
+# K3s Master Configuration (future HA target; the live cluster is not HA)
 # ============================================================================
 # High Availability Configuration
-k3s_ha_mode: true  # Enabled for HA with multiple masters
+k3s_ha_mode: true  # Desired mode after the explicit migration
 
 k3s_master_args:
   - "--cluster-init"                 # Enable embedded etcd for HA

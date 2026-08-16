@@ -15,11 +15,11 @@ This directory supports multiple K3s cluster configurations. Choose the one that
 ansible-playbook -i inventories/single-pi.yml playbooks/k3s-install.yml
 ```
 
-### Multi-Node Production (4 Workers + 1 Master)
+### Multi-Node Production (8 Workers + 1 Master)
 - **Inventory:** `inventories/multinode.yml`
 - **Configuration:** `group_vars/multinode/all.yml`
-- **Usage:** Production workloads across 5 Raspberry Pis
-- **HA Enabled:** Fresh installs can use embedded etcd; existing clusters require the migration playbook
+- **Usage:** Production workloads across 9 Raspberry Pis
+- **Current state:** One primary master and eight workers; HA migration has not been performed
 
 **Install:**
 ```bash
@@ -94,6 +94,11 @@ ansible-playbook -i inventories/single-pi.yml playbooks/k3s-reset.yml
 # Multi-node
 ansible-playbook -i inventories/multinode.yml playbooks/k3s-reset.yml
 ```
+
+## Future HA Operations
+
+The following operations are preparation for a future migration window. Do not
+run them against the live cluster until the HA change is scheduled.
 
 ### Migrate the Existing Primary to HA
 
@@ -191,6 +196,6 @@ grep "k3s_version" group_vars/*/all.yml
 ## Notes
 
 - **Single-Pi:** No HA support, no cluster-init, simpler networking
-- **Multi-Node:** HA-capable with an explicit SQLite-to-etcd migration, worker taints, and production features
+- **Multi-Node:** Currently one primary plus eight workers; HA migration tooling is available but not active
 - Both clusters use the same playbooks, just different inventories and variables
 - When migrating between clusters, ensure SSH keys are available for all nodes

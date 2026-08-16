@@ -4,44 +4,29 @@ Enterprise-grade Ansible automation for deploying K3s Kubernetes clusters on Ras
 
 ## Overview
 
-This project deploys a production-ready K3s Kubernetes cluster on Raspberry Pi 4B devices with:
-- 1 Master Node (control plane) - **Can be scaled to 3, 5, or 7 for HA**
-- 4 Worker Nodes (easily scalable)
+This project manages the current production K3s cluster on Raspberry Pi 4B devices with:
+- 1 primary Master Node (control plane)
+- 8 Worker Nodes
 - Automatic prerequisite configuration
-- Guarded SQLite-to-etcd HA migration and expansion support
-- Embedded etcd for multi-master clusters
+- Guarded SQLite-to-etcd HA migration tooling for a future expansion
 
-## Architecture
+## Current Architecture
 
-```
-┌─────────────────────────────────────────────────┐
-│  Raspberry Pi K3s Cluster                       │
-├─────────────────────────────────────────────────┤
-│                                                 │
-│  pi-01 (10.10.10.230) - Master Node             │
-│  ├─ K3s Server                                  │
-│  ├─ etcd (embedded)                             │
-│  ├─ API Server, Scheduler, Controller           │
-│  └─ No workload pods (tainted)                  │
-│                                                 │
-│  pi-02 (10.10.10.25) - Worker Node 1            │
-│  ├─ K3s Agent                                   │
-│  └─ Workload pods                               │
-│                                                 │
-│  pi-03 (10.10.10.45) - Worker Node 2            │
-│  ├─ K3s Agent                                   │
-│  └─ Workload pods                               │
-│                                                 │
-│  pi-04 (10.10.10.148) - Worker Node 3           │
-│  ├─ K3s Agent                                   │
-│  └─ Workload pods                               │
-│                                                 │
-│  pi-05 (10.10.10.216) - Worker Node 4           │
-│  ├─ K3s Agent                                   │
-│  └─ Workload pods                               │
-│                                                 │
-└─────────────────────────────────────────────────┘
-```
+The live cluster is currently a single-primary, eight-worker K3s cluster. The
+primary uses the original single-server datastore; HA migration is planned but
+has not been performed.
+
+| Node | Address | Role |
+|---|---:|---|
+| pi-01 | 10.10.10.230 | Primary master |
+| pi-02 | 10.10.10.216 | Worker |
+| pi-03 | 10.10.10.45 | Worker |
+| pi-04 | 10.10.10.25 | Worker |
+| pi-05 | 10.10.10.148 | Worker |
+| pi-06 | 10.10.10.29 | Worker (`raspberrypi-51249e4e`) |
+| pi-07 | 10.10.10.218 | Worker (`raspberrypi-d868c445`) |
+| pi-08 | 10.10.10.18 | Worker (`raspberrypi-f3bf5023`) |
+| pi-09 | 10.10.10.122 | Worker (`raspberrypi-e2c042ff`) |
 
 ## Directory Structure
 
@@ -51,9 +36,13 @@ ansible/
 │   ├── multinode.yml          # Production cluster
 │   └── single-pi.yml          # Single-node cluster
 ├── group_vars/
-│   └── all.yml               # K3s configuration variables
+│   ├── all.yml               # Shared defaults
+│   ├── multinode/all.yml     # Current production cluster
+│   └── single_pi/all.yml     # Single-node cluster
 ├── playbooks/                # All playbooks
 │   ├── k3s-install.yml      # Main cluster installation
+│   ├── migrate-single-server-to-ha.yml
+│   ├── promote-worker-to-master.yml
 │   └── k3s-reset.yml        # Complete cluster removal
 ├── tasks/                    # Reusable task files
 │   ├── prerequisites.yml    # System preparation
@@ -94,14 +83,18 @@ master:
 workers:
   hosts:
     pi-02:
-      ansible_host: 10.10.10.25   # Your worker IPs
+      ansible_host: 10.10.10.216   # Your worker IPs
     pi-03:
       ansible_host: 10.10.10.45
     pi-04:
-      ansible_host: 10.10.10.148
+      ansible_host: 10.10.10.25
     pi-05:
-      ansible_host: 10.10.10.216
+      ansible_host: 10.10.10.148
 ```
+
+The committed inventory contains all eight current workers. Keep the
+`k3s_node_name_override` values for nodes whose Linux/Kubernetes names differ
+from their Ansible aliases.
 
 Then run the static IP configuration playbook:
 
@@ -218,7 +211,11 @@ install_kubectl_completion: true
 
 ## Available Playbooks
 
-### add-masters.yml
+The live cluster is currently **not HA**. The migration and master-expansion
+playbooks below are preparation for a future maintenance window; they do not
+describe the current running topology.
+
+### Future HA: add-masters.yml
 
 Adds fresh additional master nodes after the existing primary has been migrated
 to embedded etcd. The migration itself is a separate, guarded operation.

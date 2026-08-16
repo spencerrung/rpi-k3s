@@ -1,6 +1,6 @@
 ---
 # Multi-Node RPi Cluster Inventory
-# 1 Master + 4 Workers for production workloads
+# Current production cluster: 1 primary master + 8 workers
 
 all:
   children:
@@ -38,6 +38,21 @@ all:
                   ansible_host: 10.10.10.18
                   ansible_user: pi
                   ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                pi-06:
+                  ansible_host: 10.10.10.29
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                  k3s_node_name_override: raspberrypi-51249e4e
+                pi-07:
+                  ansible_host: 10.10.10.218
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                  k3s_node_name_override: raspberrypi-d868c445
+                pi-09:
+                  ansible_host: 10.10.10.122
+                  ansible_user: pi
+                  ansible_ssh_private_key_file: ~/.ssh/raspberrypi_rsa
+                  k3s_node_name_override: raspberrypi-e2c042ff
 
         # Additional masters must be fresh nodes. Existing workers require the
         # separately guarded promotion workflow.

@@ -1,4 +1,9 @@
-# K3s High Availability Setup
+# Future K3s High Availability Setup
+
+> Current live state: one primary master and eight workers. The cluster is not
+> HA today. This is a future migration guide; do not run these playbooks until
+> the change is scheduled and the inventory has been verified against the live
+> cluster.
 
 This repository supports two HA operations:
 
