@@ -5,7 +5,8 @@ agents, and fuse-overlayfs. Some older configuration examples describe an HA
 etcd setup; do not replay them over the live server during an upgrade.
 
 Use the official K3s manual binary upgrade method to preserve the active
-systemd units and environment. Do not run reset, uninstall or killall scripts.
+systemd units and environment. Do not run reset, uninstall or killall scripts
+as part of a normal version upgrade.
 A brief control-plane interruption is expected because there is one server.
 
 For each target, download `k3s-arm64` and `sha256sum-arm64.txt` from that
@@ -42,6 +43,58 @@ against a migrated database. Preserve failed state before restoring anything.
 Two agents (10.10.10.218 and 10.10.10.122) had obsolete server units repeatedly
 failing with `etcd disabled`. Their unit/environment files were backed up and
 only the failed server services disabled; their healthy agent services remain.
+
+## Recovery observed during the 1.31 runtime transition
+
+On pi-03, containerd garbage collection encountered an abandoned fuse-overlayfs
+snapshot containing over 1.8 million `gosnowflake-cgo*` temporary files. The
+snapshotter held its write lock while deleting them from the SD card, blocking
+all new containers. Timed-out requests then produced stale container/sandbox
+name reservations. Increasing application startup deadlines would not resolve
+this runtime lock.
+
+The diagnostic was a containerd SIGUSR1 goroutine dump: snapshot creation waited
+on `snapshotter.createSnapshot` while garbage collection was in
+`fuse-overlayfs-snapshotter.Remove` / `os.RemoveAll`. Do not mistake this for a
+full disk or delete live snapshot directories.
+
+Recovery stopped the agent, confirmed containerd had exited and the discarded
+snapshot had no mount-namespace references, copied both containerd metadata
+databases, and renamed only that already-discarded snapshot into
+`/var/lib/rancher/k3s/agent/gc-quarantine-20261115/89656`. Its remaining contents
+were preserved outside the snapshotter's managed directory. Starting the agent
+then allowed new containers to start. This is incident-specific recovery, not
+a general instruction to move snapshot directories during upgrades.
+
+Vault required manual unseal after its container restarted. A fresh restricted
+test pod on pi-03 verified cluster DNS, the custom Authentik-to-Traefik DNS
+rewrite and writable ephemeral storage. Seerr's replacement pod also confirmed
+installation of the existing request-scoped season-search patch. Keep the
+quarantine and private diagnostic/metadata backups until separately reviewed.
+
+## Corrupt worker runtime catalog recovery
+
+During the 1.33 control-plane step, `raspberrypi-51249e4e` (still on 1.32)
+failed to start new containers. Containerd repeatedly panicked while reading
+page 699 of the fuse-overlayfs snapshot catalog. The node's existing container
+processes initially survived, so pod readiness alone did not reveal the crash
+loop. Check the actual agent service and fresh pod creation when diagnosing a
+stalled upgrade.
+
+The rollout was stopped and that worker cordoned. Recovery saved the runtime
+metadata, a logical AI PostgreSQL dump and an offline archive of both local
+application PVC directories. PostgreSQL was stopped with its fast-shutdown
+signal. The views service did not exit on TERM; its JSON data was backed up and
+validated before terminating it. The offline archive was verified by reading
+all members.
+
+Only after these backups, the node-local `k3s-killall.sh` was used to clean up
+the failed runtime and mounts. With no runtime processes or mounts remaining,
+`agent/containerd` was renamed to `agent/containerd-corrupt-20261115`, retaining
+the damaged cache for investigation. Restarting the same K3s agent recreates
+the disposable runtime cache and pulls images again. The application data in
+`/var/lib/rancher/k3s/storage` is left in place. Never remove that storage tree,
+uninstall K3s, or apply this recovery to a server datastore.
 
 References: https://docs.k3s.io/upgrades/manual and
 https://docs.k3s.io/datastore/backup-restore

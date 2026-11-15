@@ -177,10 +177,12 @@ kubectl get pods -A
 
 ### K3s Version
 
-Edit `group_vars/all.yml`:
+The production homelab version is pinned in
+`ansible/group_vars/multinode/all.yml`. The separate single-Pi configuration
+has its own version pin.
 
 ```yaml
-k3s_version: v1.29.10+k3s1  # Change to desired version
+k3s_version: v1.37.2+k3s1
 ```
 
 ### Disable Default Components
@@ -354,15 +356,11 @@ sudo journalctl -u k3s-agent -f
 
 ### Upgrade Cluster
 
-1. Update version in `group_vars/all.yml`:
-   ```yaml
-   k3s_version: v1.30.0+k3s1
-   ```
-
-2. Rerun installation:
-   ```bash
-   ansible-playbook -i inventories/multinode.yml playbooks/k3s-install.yml
-   ```
+Follow [Sequential homelab upgrades](docs/sequential-upgrade.md). The live
+homelab has one SQLite server and eight workers. Upgrade one minor at a time,
+server first, with verified off-node backups and workload checks between
+nodes. Use the guarded manual-binary procedure to preserve the live service
+configuration; do not replay the HA installation examples over this cluster.
 
 ### Add Worker Node
 
